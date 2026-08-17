@@ -163,6 +163,11 @@
             const [isDragging, setIsDragging] = useState(false);
             const [mappingModal, setMappingModal] = useState({ open: false, adId: '', adName: '' });
 
+            // --- State untuk Fitur Search, Filter & Sort ---
+            const [searchTerm, setSearchTerm] = useState("");
+            const [statusFilter, setStatusFilter] = useState("All");
+            const [sortBy, setSortBy] = useState("newest");
+
             const [newAdId, setNewAdId] = useState("");
             const [newAdName, setNewAdName] = useState("");
 
@@ -481,42 +486,73 @@
                 e.target.value = null; 
             };
 
-            // 1. Filter Leads yang MASUK dalam rentang tanggal
-            const leadsGeneratedInRange = leads.filter(l => {
-                const lDate = l.lead_date || l.dateOnly;
+            // --- Memproses Data untuk Fitur Search, Filter, Sort Leads ---
+            const processedLeads = React.useMemo(() => {
+                let result = [...leads];
+
+                // 1. Filter Status
+                if (statusFilter !== "All") {
+                    result = result.filter(l => l.status === statusFilter);
+                }
+
+                // 2. Pencarian (Nama, No WA, Nama Iklan, ID Iklan)
+                if (searchTerm.trim() !== "") {
+                    const lowerSearch = searchTerm.toLowerCase();
+                    result = result.filter(l => {
+                        const adName = getAdDisplayName(l.ad_id) || l.ad_name || "";
+                        return (
+                            (l.nama_lengkap && l.nama_lengkap.toLowerCase().includes(lowerSearch)) ||
+                            (l.no_wa && l.no_wa.includes(lowerSearch)) ||
+                            (adName.toLowerCase().includes(lowerSearch)) ||
+                            (l.ad_id && l.ad_id.toLowerCase().includes(lowerSearch))
+                        );
+                    });
+                }
+
+                // 3. Pengurutan (Sort)
+                result.sort((a, b) => {
+                    if (sortBy === "newest") return b.created_at - a.created_at;
+                    if (sortBy === "oldest") return a.created_at - b.created_at;
+                    if (sortBy === "highest_nominal") return (parseInt(b.nominal_closing || b.nominal) || 0) - (parseInt(a.nominal_closing || a.nominal) || 0);
+                    if (sortBy === "lowest_nominal") return (parseInt(a.nominal_closing || a.nominal) || 0) - (parseInt(b.nominal_closing || b.nominal) || 0);
+                    if (sortBy === "name_asc") return (a.nama_lengkap || "").localeCompare(b.nama_lengkap || "");
+                    if (sortBy === "name_desc") return (b.nama_lengkap || "").localeCompare(a.nama_lengkap || "");
+                    return 0;
+                });
+
+                return result;
+            }, [leads, searchTerm, statusFilter, sortBy, adMappings]);
+
+            const leadsGeneratedInRange = leads.filter(lead => {
+                const lDate = lead.lead_date || lead.dateOnly; 
                 if (filterStart && lDate < filterStart) return false;
                 if (filterEnd && lDate > filterEnd) return false;
                 return true;
             });
 
-            // 2. Filter Leads yang CLOSING dalam rentang tanggal (Pisah Logika)
-            const leadsClosedInRange = leads.filter(l => {
-                if (l.status !== 'Closing') return false;
-                const cDate = l.tanggal_closing || l.lead_date || l.dateOnly;
+            const leadsClosedInRange = leads.filter(lead => {
+                if (lead.status !== 'Closing') return false;
+                const cDate = lead.tanggal_closing || lead.lead_date || lead.dateOnly;
                 if (filterStart && cDate < filterStart) return false;
                 if (filterEnd && cDate > filterEnd) return false;
                 return true;
             });
 
-            // 3. Filter Biaya Iklan dalam rentang tanggal
             const spendsInRange = adSpends.filter(spend => {
                 if (filterStart && spend.date < filterStart) return false;
                 if (filterEnd && spend.date > filterEnd) return false;
                 return true;
             });
 
-            // --- Top Dashboard Stats ---
             const totalLeads = leadsGeneratedInRange.length;
+            const totalClosing = leadsClosedInRange.length;
             const totalFollowUp = leadsGeneratedInRange.filter(l => l.status === 'Follow Up').length;
             const totalLost = leadsGeneratedInRange.filter(l => l.status === 'Lost').length;
-            
-            const totalClosing = leadsClosedInRange.length;
             const totalRevenue = leadsClosedInRange.reduce((acc, l) => acc + (parseInt(l.nominal_closing || l.nominal) || 0), 0);
             
             const totalAdSpend = spendsInRange.reduce((acc, s) => acc + s.amount, 0);
             const totalROAS = totalAdSpend > 0 ? (totalRevenue / totalAdSpend).toFixed(2) : (totalRevenue > 0 ? '∞' : '0.00');
 
-            // --- Performa Harian (Daily Stats) ---
             const allDates = new Set([
                 ...leadsGeneratedInRange.map(l => l.lead_date || l.dateOnly || "Tanpa Tanggal"),
                 ...leadsClosedInRange.map(l => l.tanggal_closing || l.lead_date || l.dateOnly || "Tanpa Tanggal"),
@@ -781,10 +817,35 @@
                                     )}
                                 </div>
                                 <div className="lg:col-span-8">
-                                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 h-full min-h-[600px] flex flex-col"><div className="px-6 py-4 border-b bg-gray-50 flex justify-between"><h2 className="font-semibold text-gray-700 flex items-center gap-2"><i className="ph ph-database text-brand-600 text-lg"></i> Database Leads ({leads.length})</h2></div>
+                                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 h-full min-h-[600px] flex flex-col">
+                                        <div className="px-6 py-4 border-b bg-gray-50 flex flex-col xl:flex-row xl:items-center justify-between gap-4">
+                                            <h2 className="font-semibold text-gray-700 flex items-center gap-2 whitespace-nowrap">
+                                                <i className="ph ph-database text-brand-600 text-lg"></i> Database Leads ({processedLeads.length})
+                                            </h2>
+                                            <div className="flex flex-col sm:flex-row gap-2 w-full xl:w-auto">
+                                                <div className="relative flex-1 sm:w-48">
+                                                    <i className="ph ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
+                                                    <input type="text" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="Cari nama, WA, iklan..." className="w-full pl-9 pr-3 py-2 text-xs border border-gray-300 rounded-lg focus:ring-2 focus:ring-brand-500 outline-none" />
+                                                </div>
+                                                <select value={statusFilter} onChange={e => setStatusFilter(e.target.value)} className="py-2 px-3 text-xs border border-gray-300 rounded-lg focus:ring-2 focus:ring-brand-500 outline-none bg-white font-medium cursor-pointer">
+                                                    <option value="All">Semua Status</option>
+                                                    <option value="Follow Up">⏳ Follow Up</option>
+                                                    <option value="Closing">✅ Closing</option>
+                                                    <option value="Lost">❌ Lost</option>
+                                                </select>
+                                                <select value={sortBy} onChange={e => setSortBy(e.target.value)} className="py-2 px-3 text-xs border border-gray-300 rounded-lg focus:ring-2 focus:ring-brand-500 outline-none bg-white font-medium cursor-pointer">
+                                                    <option value="newest">Terbaru</option>
+                                                    <option value="oldest">Terlama</option>
+                                                    <option value="highest_nominal">Nominal Tertinggi</option>
+                                                    <option value="lowest_nominal">Nominal Terendah</option>
+                                                    <option value="name_asc">Nama (A-Z)</option>
+                                                    <option value="name_desc">Nama (Z-A)</option>
+                                                </select>
+                                            </div>
+                                        </div>
                                         <div className="p-4 flex-1 overflow-auto bg-gray-50/50">
                                             <div className="space-y-4">
-                                                {leads.map((lead) => {
+                                                {processedLeads.map((lead) => {
                                                     const resolvedAdName = getAdDisplayName(lead.ad_id) || lead.ad_name;
                                                     return (
                                                         <div key={lead.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm relative group hover:border-brand-300 transition-colors">
@@ -822,7 +883,12 @@
                                                         </div>
                                                     );
                                                 })}
-                                                {leads.length === 0 && <div className="text-center py-10 text-gray-400"><i className="ph ph-empty text-4xl mb-2"></i><p className="text-sm">Belum ada data leads.</p></div>}
+                                                {processedLeads.length === 0 && (
+                                                    <div className="text-center py-10 text-gray-400">
+                                                        <i className="ph ph-empty text-4xl mb-2"></i>
+                                                        <p className="text-sm">{leads.length === 0 ? "Belum ada data leads." : "Data tidak ditemukan berdasarkan pencarian/filter."}</p>
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
                                     </div>
