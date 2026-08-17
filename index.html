@@ -168,6 +168,9 @@
             const [statusFilter, setStatusFilter] = useState("All");
             const [sortBy, setSortBy] = useState("newest");
 
+            const [leadListStartDate, setLeadListStartDate] = useState("");
+            const [leadListEndDate, setLeadListEndDate] = useState("");
+
             const [newAdId, setNewAdId] = useState("");
             const [newAdName, setNewAdName] = useState("");
 
@@ -520,8 +523,16 @@
                     return 0;
                 });
 
+                // 4. Filter Rentang Tanggal Lead Masuk
+                if (leadListStartDate) {
+                    result = result.filter(l => (l.lead_date || l.dateOnly) >= leadListStartDate);
+                }
+                if (leadListEndDate) {
+                    result = result.filter(l => (l.lead_date || l.dateOnly) <= leadListEndDate);
+                }
+
                 return result;
-            }, [leads, searchTerm, statusFilter, sortBy, adMappings]);
+            }, [leads, searchTerm, statusFilter, sortBy, adMappings, leadListStartDate, leadListEndDate]);
 
             const leadsGeneratedInRange = leads.filter(lead => {
                 const lDate = lead.lead_date || lead.dateOnly; 
@@ -822,7 +833,13 @@
                                             <h2 className="font-semibold text-gray-700 flex items-center gap-2 whitespace-nowrap">
                                                 <i className="ph ph-database text-brand-600 text-lg"></i> Database Leads ({processedLeads.length})
                                             </h2>
-                                            <div className="flex flex-col sm:flex-row gap-2 w-full xl:w-auto">
+                                            <div className="flex flex-col sm:flex-row flex-wrap gap-2 w-full xl:w-auto">
+                                                <div className="flex items-center justify-between gap-1.5 border border-gray-300 rounded-lg px-3 py-1.5 bg-white focus-within:ring-2 focus-within:ring-brand-500 w-full sm:w-auto">
+                                                    <i className="ph ph-calendar-blank text-gray-500"></i>
+                                                    <input type="date" value={leadListStartDate} onChange={e => setLeadListStartDate(e.target.value)} className="text-xs outline-none bg-transparent text-gray-700 cursor-pointer w-[110px]" title="Dari Tanggal" />
+                                                    <span className="text-gray-400 text-xs font-bold">-</span>
+                                                    <input type="date" value={leadListEndDate} onChange={e => setLeadListEndDate(e.target.value)} className="text-xs outline-none bg-transparent text-gray-700 cursor-pointer w-[110px]" title="Sampai Tanggal" />
+                                                </div>
                                                 <div className="relative flex-1 sm:w-48">
                                                     <i className="ph ph-magnifying-glass absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
                                                     <input type="text" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} placeholder="Cari nama, WA, iklan..." className="w-full pl-9 pr-3 py-2 text-xs border border-gray-300 rounded-lg focus:ring-2 focus:ring-brand-500 outline-none" />
