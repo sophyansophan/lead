@@ -336,7 +336,10 @@
                 const lead = leads.find(l => l.id === id);
                 if (!lead || !isCloudReady) return;
                 let updates = { status: newStatus };
-                if (newStatus === 'Closing' && !lead.nominal_closing) updates.nominal_closing = lead.nominal;
+                if (newStatus === 'Closing') {
+                    if (!lead.nominal_closing) updates.nominal_closing = lead.nominal;
+                    if (!lead.tanggal_closing) updates.tanggal_closing = new Date().toISOString().split('T')[0];
+                }
                 try {
                     const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'leads', id);
                     await window.FB.updateDoc(docRef, updates);
@@ -478,57 +481,91 @@
                 e.target.value = null; 
             };
 
-            const filteredLeads = leads.filter(lead => {
-                const lDate = lead.lead_date || lead.dateOnly; 
+            // 1. Filter Leads yang MASUK dalam rentang tanggal
+            const leadsGeneratedInRange = leads.filter(l => {
+                const lDate = l.lead_date || l.dateOnly;
                 if (filterStart && lDate < filterStart) return false;
                 if (filterEnd && lDate > filterEnd) return false;
                 return true;
             });
 
-            const filteredSpends = adSpends.filter(spend => {
+            // 2. Filter Leads yang CLOSING dalam rentang tanggal (Pisah Logika)
+            const leadsClosedInRange = leads.filter(l => {
+                if (l.status !== 'Closing') return false;
+                const cDate = l.tanggal_closing || l.lead_date || l.dateOnly;
+                if (filterStart && cDate < filterStart) return false;
+                if (filterEnd && cDate > filterEnd) return false;
+                return true;
+            });
+
+            // 3. Filter Biaya Iklan dalam rentang tanggal
+            const spendsInRange = adSpends.filter(spend => {
                 if (filterStart && spend.date < filterStart) return false;
                 if (filterEnd && spend.date > filterEnd) return false;
                 return true;
             });
 
-            const totalLeads = filteredLeads.length;
-            const totalClosing = filteredLeads.filter(l => l.status === 'Closing').length;
-            const totalFollowUp = filteredLeads.filter(l => l.status === 'Follow Up').length;
-            const totalLost = filteredLeads.filter(l => l.status === 'Lost').length;
-            const totalRevenue = filteredLeads.filter(l => l.status === 'Closing').reduce((acc, l) => acc + (parseInt(l.nominal_closing || l.nominal) || 0), 0);
+            // --- Top Dashboard Stats ---
+            const totalLeads = leadsGeneratedInRange.length;
+            const totalFollowUp = leadsGeneratedInRange.filter(l => l.status === 'Follow Up').length;
+            const totalLost = leadsGeneratedInRange.filter(l => l.status === 'Lost').length;
             
-            const totalAdSpend = filteredSpends.reduce((acc, s) => acc + s.amount, 0);
+            const totalClosing = leadsClosedInRange.length;
+            const totalRevenue = leadsClosedInRange.reduce((acc, l) => acc + (parseInt(l.nominal_closing || l.nominal) || 0), 0);
+            
+            const totalAdSpend = spendsInRange.reduce((acc, s) => acc + s.amount, 0);
             const totalROAS = totalAdSpend > 0 ? (totalRevenue / totalAdSpend).toFixed(2) : (totalRevenue > 0 ? '∞' : '0.00');
 
-            const allDates = new Set([...filteredLeads.map(l => l.lead_date || l.dateOnly || "Tanpa Tanggal"), ...filteredSpends.map(s => s.date)]);
+            // --- Performa Harian (Daily Stats) ---
+            const allDates = new Set([
+                ...leadsGeneratedInRange.map(l => l.lead_date || l.dateOnly || "Tanpa Tanggal"),
+                ...leadsClosedInRange.map(l => l.tanggal_closing || l.lead_date || l.dateOnly || "Tanpa Tanggal"),
+                ...spendsInRange.map(s => s.date)
+            ]);
+
             const dateStats = Array.from(allDates).filter(Boolean).map(dateKey => {
-                const l = filteredLeads.filter(x => (x.lead_date || x.dateOnly || "Tanpa Tanggal") === dateKey);
-                const s = filteredSpends.filter(x => x.date === dateKey);
-                const total = l.length;
-                const closing = l.filter(x => x.status === 'Closing').length;
-                const revenue = l.filter(x => x.status === 'Closing').reduce((acc, x) => acc + (parseInt(x.nominal_closing || x.nominal) || 0), 0);
-                const spend = s.reduce((acc, x) => acc + x.amount, 0);
+                const total = leadsGeneratedInRange.filter(x => (x.lead_date || x.dateOnly || "Tanpa Tanggal") === dateKey).length;
+                
+                const closedLeads = leadsClosedInRange.filter(x => (x.tanggal_closing || x.lead_date || x.dateOnly || "Tanpa Tanggal") === dateKey);
+                const closing = closedLeads.length;
+                const revenue = closedLeads.reduce((acc, x) => acc + (parseInt(x.nominal_closing || x.nominal) || 0), 0);
+                
+                const spend = spendsInRange.filter(x => x.date === dateKey).reduce((acc, x) => acc + x.amount, 0);
                 const roas = spend > 0 ? (revenue / spend).toFixed(2) : (revenue > 0 ? '∞' : '0.00');
+                
                 return { date: dateKey, total, closing, revenue, spend, roas };
             }).sort((a, b) => new Date(b.date) - new Date(a.date));
 
+            // --- Kinerja Konten Iklan (Ad Stats) ---
             const groupedAds = {};
             const resolveGroupName = (adId, fallbackName) => {
                 const mappedName = getAdDisplayName(adId);
                 return mappedName || fallbackName || `Belum Terpetakan (ID: ${adId})`;
             };
 
-            filteredLeads.forEach(lead => {
+            // Leads masuk dialokasikan ke total, follow up, lost
+            leadsGeneratedInRange.forEach(lead => {
                 const gName = resolveGroupName(lead.ad_id, lead.ad_name);
                 if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
                 if (lead.ad_id && lead.ad_id !== "Tidak ada ID" && lead.ad_id !== "Organic") groupedAds[gName].adIds.add(lead.ad_id);
+                
                 groupedAds[gName].total += 1;
-                if (lead.status === 'Closing') { groupedAds[gName].closing += 1; groupedAds[gName].revenue += (parseInt(lead.nominal_closing || lead.nominal) || 0); }
-                else if (lead.status === 'Follow Up') groupedAds[gName].followUp += 1;
+                if (lead.status === 'Follow Up') groupedAds[gName].followUp += 1;
                 else if (lead.status === 'Lost') groupedAds[gName].lost += 1;
             });
 
-            filteredSpends.forEach(spend => {
+            // Leads closing dialokasikan ke closing dan revenue
+            leadsClosedInRange.forEach(lead => {
+                const gName = resolveGroupName(lead.ad_id, lead.ad_name);
+                if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
+                if (lead.ad_id && lead.ad_id !== "Tidak ada ID" && lead.ad_id !== "Organic") groupedAds[gName].adIds.add(lead.ad_id);
+                
+                groupedAds[gName].closing += 1;
+                groupedAds[gName].revenue += (parseInt(lead.nominal_closing || lead.nominal) || 0);
+            });
+
+            // Biaya iklan
+            spendsInRange.forEach(spend => {
                 const gName = resolveGroupName(spend.ad_id, null);
                 if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
                 if (spend.ad_id) groupedAds[gName].adIds.add(spend.ad_id);
@@ -766,7 +803,18 @@
                                                                     </div>
                                                                 )}
 
-                                                                {lead.status === 'Closing' && (<div className="mt-3 bg-emerald-50 p-3 rounded-xl border border-emerald-200 flex justify-between items-center gap-3"><div><span className="block text-xs font-bold text-emerald-800">💰 Nominal Transfer Aktual</span><span className="block text-[10px] text-emerald-600">Pastikan angka ini sesuai mutasi masuk</span></div><input type="number" value={lead.nominal_closing || lead.nominal || ''} onChange={(e) => updateLeadData(lead.id, 'nominal_closing', e.target.value)} className="w-36 border border-emerald-300 rounded-lg p-2.5 text-sm font-bold text-right text-emerald-900 bg-white focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="0"/></div>)}
+                                                                {lead.status === 'Closing' && (
+                                                                    <div className="mt-3 bg-emerald-50 p-3 rounded-xl border border-emerald-200 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                                                                        <div className="flex-1">
+                                                                            <span className="block text-xs font-bold text-emerald-800">💰 Nominal & Tgl Closing</span>
+                                                                            <span className="block text-[10px] text-emerald-600">Pastikan sesuai mutasi masuk</span>
+                                                                        </div>
+                                                                        <div className="flex items-center gap-2 w-full sm:w-auto">
+                                                                            <input type="date" title="Tanggal Closing" value={lead.tanggal_closing || lead.lead_date || lead.dateOnly || ''} onChange={(e) => updateLeadData(lead.id, 'tanggal_closing', e.target.value)} className="w-full sm:w-auto border border-emerald-300 rounded-lg p-2.5 text-xs font-bold text-emerald-900 bg-white focus:ring-2 focus:ring-emerald-500 outline-none" />
+                                                                            <input type="number" title="Nominal Aktual" value={lead.nominal_closing || lead.nominal || ''} onChange={(e) => updateLeadData(lead.id, 'nominal_closing', e.target.value)} className="w-full sm:w-36 border border-emerald-300 rounded-lg p-2.5 text-sm font-bold text-right text-emerald-900 bg-white focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="0"/>
+                                                                        </div>
+                                                                    </div>
+                                                                )}
                                                             </div>
                                                             <div className="w-full md:w-52 shrink-0 flex flex-col gap-2"><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">Status Lead</label>
                                                                 <select value={lead.status} onChange={(e) => updateStatus(lead.id, e.target.value)} className={`w-full border rounded-xl p-3 text-sm font-bold outline-none shadow-sm cursor-pointer transition-colors ${lead.status === 'Follow Up' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' : lead.status === 'Closing' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}><option value="Follow Up">⏳ Follow Up</option><option value="Closing">✅ Closing (Donasi)</option><option value="Lost">❌ Lost (Batal)</option></select>
