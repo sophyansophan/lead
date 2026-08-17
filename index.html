@@ -17,15 +17,15 @@
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, updateDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Mengekspos modul Firebase ke window agar bisa digunakan oleh React (Babel)
+        // Mengekspos modul Firebase ke window
         window.FB = { 
             initializeApp, getAuth, signInAnonymously, signInWithCustomToken, 
+            signInWithEmailAndPassword, signOut, onAuthStateChanged,
             getFirestore, doc, setDoc, updateDoc, deleteDoc, onSnapshot, collection 
         };
-        // Memberikan sinyal bahwa Firebase siap
         window.dispatchEvent(new Event('firebase-modules-loaded'));
     </script>
 
@@ -57,7 +57,6 @@
     <script type="text/babel">
         const { useState, useEffect } = React;
 
-        // --- Helper Function: Parsing Logic dari Berdu ---
         const parseBerduText = (text, adMappings = []) => {
             let ad_id = "";
             let campaign_id = "";
@@ -75,7 +74,8 @@
                 } catch(e) { console.error("URL Invalid", e); }
             }
 
-            const mappedAd = adMappings.find(m => m.id === ad_id);
+            // Temukan mapping berdasarkan array ID yang sudah disatukan
+            const mappedAd = adMappings.find(m => m.mappedIds && m.mappedIds.includes(ad_id));
             const ad_name = mappedAd ? mappedAd.name : null;
 
             const extractLine = (regex) => {
@@ -109,7 +109,6 @@
             };
         };
 
-        // --- Helper Function: CSV Parser untuk Ekspor Meta Ads ---
         const parseCSV = (str) => {
             const arr = [];
             let quote = false;
@@ -128,35 +127,35 @@
             return arr;
         };
 
-        // --- Component: Notification Toast ---
         const Toast = ({ message, type, onClose }) => {
             useEffect(() => {
                 const timer = setTimeout(onClose, 3000);
                 return () => clearTimeout(timer);
             }, [onClose]);
-
             const bgColor = type === 'success' ? 'bg-brand-600' : type === 'warning' ? 'bg-amber-500' : 'bg-red-500';
             const icon = type === 'success' ? 'ph-check-circle' : 'ph-warning-circle';
-
             return (
                 <div className={`fixed bottom-4 right-4 ${bgColor} text-white px-4 py-3 rounded-xl shadow-lg flex items-center gap-3 transition-all z-50 animate-bounce`}>
-                    <i className={`${icon} text-xl`}></i>
-                    <p className="font-medium text-sm">{message}</p>
+                    <i className={`${icon} text-xl`}></i><p className="font-medium text-sm">{message}</p>
                 </div>
             );
         };
 
         const App = () => {
-            // Firebase States
             const [fbApp, setFbApp] = useState(null);
             const [isCloudReady, setIsCloudReady] = useState(false);
             
-            // App States
+            // Auth States
+            const [user, setUser] = useState(null);
+            const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+            const [loginEmail, setLoginEmail] = useState("");
+            const [loginPassword, setLoginPassword] = useState("");
+            const [loginLoading, setLoginLoading] = useState(false);
+            
             const [leads, setLeads] = useState([]);
-            const [adMappings, setAdMappings] = useState([]);
+            const [rawAdMappings, setRawAdMappings] = useState([]); // Raw dari DB
             const [adSpends, setAdSpends] = useState([]);
             
-            // UI States
             const [rawText, setRawText] = useState("");
             const [parsedData, setParsedData] = useState(null);
             const [toast, setToast] = useState(null);
@@ -166,22 +165,19 @@
 
             const [newAdId, setNewAdId] = useState("");
             const [newAdName, setNewAdName] = useState("");
-            const [newAdPlatform, setNewAdPlatform] = useState("Instagram");
 
             const [filterStart, setFilterStart] = useState(() => {
                 const d = new Date(); d.setDate(1); return d.toISOString().split('T')[0];
             });
             const [filterEnd, setFilterEnd] = useState(() => new Date().toISOString().split('T')[0]);
 
-            // App Constants
             const APP_ID = typeof __app_id !== 'undefined' ? __app_id : 'meta-berdu-crm-v2';
 
             useEffect(() => {
                 const initFirebase = async () => {
-                    // Cek jika lingkungan platform menyediakan config, jika tidak gunakan template manual untuk GitHub
                     const envConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
                     
-                    // JIKA DI GITHUB: Isi config di bawah ini dari Firebase Console Anda
+                    // JIKA DI GITHUB: Pastikan Config ini diisi sesuai akun Firebase Anda
                     const githubConfig = {
                         apiKey: "AIzaSyAgP7wTZpCNC6K74_EWWGvWKUudoMEX3dw",
                         authDomain: "lead-b8699.firebaseapp.com",
@@ -191,72 +187,115 @@
                         appId: "1:878245874778:web:7cd0ddf6e8c4c44070dc63"
                     };
                     
-                    const finalConfig = envConfig ? JSON.parse(envConfig) : (githubConfig.apiKey ? githubConfig : null);
+                    const finalConfig = envConfig ? JSON.parse(envConfig) : githubConfig;
 
-                    if (!finalConfig) {
-                        setToast({ type: 'warning', message: 'Mode Offline: Konfigurasi Firebase belum diatur.' });
-                        return; // Berhenti jika tidak ada konfigurasi database
+                    if (!finalConfig.apiKey) {
+                        setToast({ type: 'warning', message: 'Konfigurasi Firebase belum diatur.' });
+                        setIsCheckingAuth(false);
+                        return; 
                     }
 
                     try {
                         const app = window.FB.initializeApp(finalConfig);
                         const db = window.FB.getFirestore(app);
                         const auth = window.FB.getAuth(app);
-
-                        // Wajib Auth sebelum Query (Rule 3)
-                        if (typeof __initial_auth_token !== 'undefined') {
-                            await window.FB.signInWithCustomToken(auth, __initial_auth_token);
-                        } else {
-                            await window.FB.signInAnonymously(auth);
-                        }
                         
                         setFbApp({ db, auth });
-                        setIsCloudReady(true);
-                        setToast({ type: 'success', message: 'Terhubung ke Cloud Database!' });
+
+                        // Logika Auth: Bypass Otomatis hanya untuk Immersive Web App
+                        if (typeof __initial_auth_token !== 'undefined') {
+                            await window.FB.signInWithCustomToken(auth, __initial_auth_token);
+                        }
+                        
+                        // Listener status login
+                        window.FB.onAuthStateChanged(auth, (currentUser) => {
+                            if (currentUser) {
+                                setUser(currentUser);
+                                setIsCloudReady(true);
+                            } else {
+                                setUser(null);
+                                setIsCloudReady(false);
+                            }
+                            setIsCheckingAuth(false);
+                        });
+
                     } catch(err) {
                         console.error("Gagal inisialisasi Firebase", err);
-                        setToast({ type: 'error', message: 'Gagal terhubung ke server.' });
+                        setToast({ type: 'error', message: 'Gagal inisialisasi sistem.' });
+                        setIsCheckingAuth(false);
                     }
                 };
 
-                if (window.FB) {
-                    initFirebase();
-                } else {
-                    window.addEventListener('firebase-modules-loaded', initFirebase);
-                    return () => window.removeEventListener('firebase-modules-loaded', initFirebase);
-                }
+                if (window.FB) initFirebase();
+                else window.addEventListener('firebase-modules-loaded', initFirebase);
+                return () => window.removeEventListener('firebase-modules-loaded', initFirebase);
             }, []);
 
             useEffect(() => {
-                if (!isCloudReady || !fbApp) return;
+                if (!isCloudReady || !fbApp || !user) return;
 
                 const db = fbApp.db;
                 
-                // 1. Listen Leads
                 const leadsRef = window.FB.collection(db, 'artifacts', APP_ID, 'public', 'data', 'leads');
                 const unsubLeads = window.FB.onSnapshot(leadsRef, (snapshot) => {
                     const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    // Pengurutan dilakukan di memori (Rule 2)
                     data.sort((a, b) => b.created_at - a.created_at);
                     setLeads(data);
-                }, (error) => console.error("Error Leads:", error));
+                }, (e) => console.error(e));
 
-                // 2. Listen Ad Mappings
                 const mapRef = window.FB.collection(db, 'artifacts', APP_ID, 'public', 'data', 'adMappings');
                 const unsubMap = window.FB.onSnapshot(mapRef, (snapshot) => {
                     const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-                    setAdMappings(data);
-                }, (error) => console.error("Error Mapping:", error));
+                    setRawAdMappings(data);
+                }, (e) => console.error(e));
 
-                // 3. Listen Ad Spends
                 const spendRef = window.FB.collection(db, 'artifacts', APP_ID, 'public', 'data', 'adSpends');
                 const unsubSpend = window.FB.onSnapshot(spendRef, (snapshot) => {
                     const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
                     setAdSpends(data);
-                }, (error) => console.error("Error Spends:", error));
+                }, (e) => console.error(e));
 
                 return () => { unsubLeads(); unsubMap(); unsubSpend(); };
-            }, [isCloudReady, fbApp]);
+            }, [isCloudReady, fbApp, user]);
+
+            // --- Fungsi Autentikasi (Login & Logout) ---
+            const handleLogin = async (e) => {
+                e.preventDefault();
+                setLoginLoading(true);
+                try {
+                    await window.FB.signInWithEmailAndPassword(fbApp.auth, loginEmail, loginPassword);
+                    setToast({ type: 'success', message: 'Login Berhasil!' });
+                } catch (error) {
+                    let msg = "Gagal login. Periksa email/password Anda.";
+                    if (error.code === 'auth/user-not-found' || error.code === 'auth/wrong-password') msg = "Email atau Password salah!";
+                    else if (error.code === 'auth/invalid-email') msg = "Format email tidak valid.";
+                    setToast({ type: 'error', message: msg });
+                }
+                setLoginLoading(false);
+            };
+
+            const handleLogout = async () => {
+                try {
+                    await window.FB.signOut(fbApp.auth);
+                    setToast({ type: 'success', message: 'Berhasil Keluar.' });
+                } catch(e) {}
+            };
+
+            // --- Logika Penyatuan ID berdasarkan Nama ---
+            const adMappings = React.useMemo(() => {
+                const grouped = {};
+                rawAdMappings.forEach(item => {
+                    const nameKey = item.name.trim().toLowerCase();
+                    if (!grouped[nameKey]) grouped[nameKey] = { name: item.name, mappedIds: [] };
+                    grouped[nameKey].mappedIds.push(item.id);
+                });
+                return Object.values(grouped); 
+            }, [rawAdMappings]);
+
+            const getAdDisplayName = (adId) => {
+                const found = adMappings.find(m => m.mappedIds.includes(adId));
+                return found ? found.name : null;
+            };
 
             useEffect(() => {
                 if (rawText.trim().length > 10) {
@@ -279,43 +318,25 @@
             const handleFieldChange = (field, value) => setParsedData(prev => ({ ...prev, [field]: value }));
 
             const handleSave = async () => {
-                if (!parsedData.nama_lengkap || !parsedData.no_wa) {
-                    setToast({ type: 'error', message: 'Nama Lengkap & No WhatsApp wajib terisi!' });
-                    return;
-                }
-                
-                const mapped = adMappings.find(m => m.id === parsedData.ad_id);
-                const finalData = {
-                    ...parsedData,
-                    ad_name: mapped ? mapped.name : (parsedData.ad_name || null),
-                    created_at: Date.now() // Timestamp untuk sorting
-                };
+                if (!parsedData.nama_lengkap || !parsedData.no_wa) { setToast({ type: 'error', message: 'Nama Lengkap & No WhatsApp wajib terisi!' }); return; }
+                const mappedName = getAdDisplayName(parsedData.ad_id);
+                const finalData = { ...parsedData, ad_name: mappedName || (parsedData.ad_name || null), created_at: Date.now() };
                 
                 if (isCloudReady) {
                     try {
                         const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'leads', finalData.id);
                         await window.FB.setDoc(docRef, finalData);
                         setToast({ type: 'success', message: 'Lead tersimpan di Cloud!' });
-                    } catch (e) {
-                        setToast({ type: 'error', message: 'Gagal menyimpan ke cloud.' });
-                    }
-                } else {
-                    setToast({ type: 'error', message: 'Menunggu koneksi database...' });
+                    } catch (e) { setToast({ type: 'error', message: 'Gagal menyimpan ke cloud.' }); }
                 }
-
-                setRawText("");
-                setParsedData(null);
+                setRawText(""); setParsedData(null);
             };
 
             const updateStatus = async (id, newStatus) => {
                 const lead = leads.find(l => l.id === id);
                 if (!lead || !isCloudReady) return;
-
                 let updates = { status: newStatus };
-                if (newStatus === 'Closing' && !lead.nominal_closing) {
-                    updates.nominal_closing = lead.nominal;
-                }
-
+                if (newStatus === 'Closing' && !lead.nominal_closing) updates.nominal_closing = lead.nominal;
                 try {
                     const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'leads', id);
                     await window.FB.updateDoc(docRef, updates);
@@ -327,7 +348,7 @@
                 try {
                     const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'leads', id);
                     await window.FB.updateDoc(docRef, { [field]: value });
-                } catch(e) { console.error(e); }
+                } catch(e) {}
             };
 
             const deleteLead = async (id) => {
@@ -335,36 +356,30 @@
                 try {
                     const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'leads', id);
                     await window.FB.deleteDoc(docRef);
-                    setToast({ type: 'success', message: 'Lead dihapus dari Cloud.' });
-                } catch(e) { setToast({ type: 'error', message: 'Gagal menghapus' }); }
+                    setToast({ type: 'success', message: 'Lead dihapus.' });
+                } catch(e) {}
             };
 
-            const handleAddAdMapping = async (e) => {
-                e?.preventDefault();
-                if (!newAdId.trim() || !newAdName.trim()) {
-                    setToast({ type: 'error', message: 'ID Iklan & Nama Iklan harus diisi!' }); return;
-                }
-                
+            const handleAddAdMapping = async (e, forceId, forceName) => {
+                if (e) e.preventDefault();
+                const idToSave = forceId || newAdId;
+                const nameToSave = forceName || newAdName;
+                if (!idToSave.trim() || !nameToSave.trim()) { setToast({ type: 'error', message: 'ID Iklan & Nama harus diisi!' }); return; }
                 if (isCloudReady) {
                     try {
-                        const docId = newAdId.trim();
+                        const docId = idToSave.trim();
                         const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'adMappings', docId);
-                        await window.FB.setDoc(docRef, { id: docId, name: newAdName.trim(), platform: newAdPlatform });
-                        setToast({ type: 'success', message: 'Master Iklan berhasil disimpan!' });
-                        setNewAdId(""); setNewAdName("");
-                    } catch(e) { setToast({ type: 'error', message: 'Gagal menyimpan mapping' }); }
+                        await window.FB.setDoc(docRef, { id: docId, name: nameToSave.trim(), platform: 'Meta Ads' });
+                        if(!forceId) { setToast({ type: 'success', message: 'Master Iklan disimpan!' }); setNewAdId(""); setNewAdName(""); }
+                    } catch(err) { setToast({ type: 'error', message: 'Gagal menyimpan mapping' }); }
                 }
             };
 
             const handleQuickSaveMapping = async () => {
-                if (!mappingModal.adName.trim() || !isCloudReady) return;
-                
-                try {
-                    const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'adMappings', mappingModal.adId);
-                    await window.FB.setDoc(docRef, { id: mappingModal.adId, name: mappingModal.adName.trim(), platform: 'Meta Ads' });
-                    setToast({ type: 'success', message: `Iklan berhasil diberi nama!` });
-                    setMappingModal({ open: false, adId: '', adName: '' });
-                } catch(e) { setToast({ type: 'error', message: 'Gagal menyimpan nama' }); }
+                if (!mappingModal.adName.trim()) return;
+                await handleAddAdMapping(null, mappingModal.adId, mappingModal.adName);
+                setToast({ type: 'success', message: `Iklan berhasil diberi nama!` });
+                setMappingModal({ open: false, adId: '', adName: '' });
             };
 
             const handleDeleteAdMapping = async (id) => {
@@ -374,11 +389,6 @@
                     await window.FB.deleteDoc(docRef);
                     setToast({ type: 'success', message: 'Mapping Iklan dihapus.' });
                 } catch(e) {}
-            };
-
-            const getAdDisplayName = (adId) => {
-                const found = adMappings.find(m => m.id === adId);
-                return found ? found.name : null;
             };
 
             const handleDeleteSpend = async (id) => {
@@ -406,11 +416,10 @@
                         const rowData = parsedCsv[i].map(h => h ? h.toString().toLowerCase().trim().replace(/[\u200B-\u200D\uFEFF]/g, '') : '');
                         const hasAdId = rowData.some(h => h.includes('ad id') || h.includes('id iklan') || h === 'ad_id');
                         const hasSpend = rowData.some(h => h.includes('spent') || h.includes('spend') || h.includes('dibelanjakan') || h.includes('amount'));
-                        
                         if (hasAdId && hasSpend) { headerRowIdx = i; headers = rowData; break; }
                     }
 
-                    if (headerRowIdx === -1) { setToast({ type: 'error', message: 'Format tidak dikenali! Gagal menemukan kolom ID Iklan & Dibelanjakan.' }); return; }
+                    if (headerRowIdx === -1) { setToast({ type: 'error', message: 'Format tidak dikenali! Gagal menemukan kolom "ID Iklan" & "Dibelanjakan".' }); return; }
 
                     const dateIdx = headers.findIndex(h => h.includes('awal pelaporan') || h.includes('reporting starts') || h.includes('tanggal') || h.includes('mulai pelaporan'));
                     const adIdIdx = headers.findIndex(h => h.includes('ad id') || h.includes('id iklan') || h === 'ad_id');
@@ -418,10 +427,8 @@
                     const adNameIdx = headers.findIndex(h => h.includes('ad name') || h.includes('nama iklan'));
 
                     let importedCount = 0;
-                    
-                    if (!isCloudReady) { setToast({ type: 'error', message: 'Koneksi Cloud terputus, tidak bisa import' }); return; }
+                    if (!isCloudReady) { setToast({ type: 'error', message: 'Koneksi terputus, gagal impor.' }); return; }
 
-                    // Process rows
                     for (let i = headerRowIdx + 1; i < parsedCsv.length; i++) {
                         const row = parsedCsv[i];
                         if (row.length <= Math.max(adIdIdx, spendIdx)) continue;
@@ -430,6 +437,7 @@
                         if (!adId) continue; 
 
                         let rawDate = (dateIdx !== -1 && row[dateIdx]) ? row[dateIdx].trim().split(' ')[0] : new Date().toISOString().split('T')[0];
+                        
                         if (rawDate.includes('/')) {
                             const p = rawDate.split('/');
                             if(p.length === 3) rawDate = p[2].length === 4 ? `${p[2]}-${p[1].padStart(2, '0')}-${p[0].padStart(2, '0')}` : `${p[0]}-${p[1].padStart(2, '0')}-${p[2].padStart(2, '0')}`;
@@ -437,8 +445,9 @@
                             const p = rawDate.split('-');
                             if(p.length === 3) rawDate = p[2].length === 4 ? `${p[2]}-${p[1].padStart(2, '0')}-${p[0].padStart(2, '0')}` : `${p[0]}-${p[1].padStart(2, '0')}-${p[2].padStart(2, '0')}`;
                         }
+                        if (!rawDate.match(/^\d{4}-\d{2}-\d{2}$/)) rawDate = new Date().toISOString().split('T')[0]; // Fallback if messed up
 
-                        let rawSpend = row[spendIdx] ? row[spendIdx].toString().replace(/[^0-9,.]/g, '') : "0";
+                        let rawSpend = row[spendIdx] ? row[spendIdx].toString().replace(/[^0-9,.-]/g, '') : "0";
                         if (rawSpend.includes(',') && rawSpend.includes('.')) {
                             rawSpend = rawSpend.indexOf(',') > rawSpend.indexOf('.') ? rawSpend.replace(/\./g, '').replace(',', '.') : rawSpend.replace(/,/g, '');
                         } else if (rawSpend.includes(',')) {
@@ -451,21 +460,19 @@
                         let adName = (adNameIdx !== -1 && row[adNameIdx]) ? row[adNameIdx].trim() : "";
 
                         if (spendVal >= 0) {
-                            // Unique ID: Date + AdID
                             const spendDocId = `${rawDate}_${adId}`;
                             const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'adSpends', spendDocId);
                             await window.FB.setDoc(docRef, { id: spendDocId, date: rawDate, ad_id: adId, amount: spendVal });
                             importedCount++;
                         }
 
-                        if (adId && adName && !adMappings.some(m => m.id === adId)) {
+                        if (adId && adName && !rawAdMappings.some(m => m.id === adId)) {
                             const mapRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'adMappings', adId);
                             await window.FB.setDoc(mapRef, { id: adId, name: adName, platform: 'Meta Ads' });
                         }
                     }
-
-                    if (importedCount > 0) setToast({ type: 'success', message: `${importedCount} baris data biaya disinkronkan ke Cloud!` });
-                    else setToast({ type: 'error', message: 'Data CSV tidak valid.' });
+                    if (importedCount > 0) setToast({ type: 'success', message: `${importedCount} data biaya disinkronkan ke Cloud!` });
+                    else setToast({ type: 'error', message: 'Data CSV tidak valid atau kosong.' });
                 };
                 reader.readAsText(file);
                 e.target.value = null; 
@@ -493,61 +500,38 @@
             const totalAdSpend = filteredSpends.reduce((acc, s) => acc + s.amount, 0);
             const totalROAS = totalAdSpend > 0 ? (totalRevenue / totalAdSpend).toFixed(2) : (totalRevenue > 0 ? '∞' : '0.00');
 
-            const allDates = new Set([
-                ...filteredLeads.map(l => l.lead_date || l.dateOnly || "Tanpa Tanggal"),
-                ...filteredSpends.map(s => s.date)
-            ]);
-
+            const allDates = new Set([...filteredLeads.map(l => l.lead_date || l.dateOnly || "Tanpa Tanggal"), ...filteredSpends.map(s => s.date)]);
             const dateStats = Array.from(allDates).filter(Boolean).map(dateKey => {
                 const l = filteredLeads.filter(x => (x.lead_date || x.dateOnly || "Tanpa Tanggal") === dateKey);
                 const s = filteredSpends.filter(x => x.date === dateKey);
-                
                 const total = l.length;
                 const closing = l.filter(x => x.status === 'Closing').length;
                 const revenue = l.filter(x => x.status === 'Closing').reduce((acc, x) => acc + (parseInt(x.nominal_closing || x.nominal) || 0), 0);
                 const spend = s.reduce((acc, x) => acc + x.amount, 0);
                 const roas = spend > 0 ? (revenue / spend).toFixed(2) : (revenue > 0 ? '∞' : '0.00');
-
                 return { date: dateKey, total, closing, revenue, spend, roas };
             }).sort((a, b) => new Date(b.date) - new Date(a.date));
 
             const groupedAds = {};
-
-            // Fungsi penentu nama grup
             const resolveGroupName = (adId, fallbackName) => {
                 const mappedName = getAdDisplayName(adId);
-                if (mappedName) return mappedName; 
-                if (fallbackName) return fallbackName;
-                return `Belum Terpetakan (ID: ${adId})`;
+                return mappedName || fallbackName || `Belum Terpetakan (ID: ${adId})`;
             };
 
             filteredLeads.forEach(lead => {
                 const gName = resolveGroupName(lead.ad_id, lead.ad_name);
-                if (!groupedAds[gName]) {
-                    groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
-                }
-                if (lead.ad_id && lead.ad_id !== "Tidak ada ID" && lead.ad_id !== "Organic") {
-                    groupedAds[gName].adIds.add(lead.ad_id);
-                }
+                if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
+                if (lead.ad_id && lead.ad_id !== "Tidak ada ID" && lead.ad_id !== "Organic") groupedAds[gName].adIds.add(lead.ad_id);
                 groupedAds[gName].total += 1;
-                if (lead.status === 'Closing') {
-                    groupedAds[gName].closing += 1;
-                    groupedAds[gName].revenue += (parseInt(lead.nominal_closing || lead.nominal) || 0);
-                } else if (lead.status === 'Follow Up') {
-                    groupedAds[gName].followUp += 1;
-                } else if (lead.status === 'Lost') {
-                    groupedAds[gName].lost += 1;
-                }
+                if (lead.status === 'Closing') { groupedAds[gName].closing += 1; groupedAds[gName].revenue += (parseInt(lead.nominal_closing || lead.nominal) || 0); }
+                else if (lead.status === 'Follow Up') groupedAds[gName].followUp += 1;
+                else if (lead.status === 'Lost') groupedAds[gName].lost += 1;
             });
 
             filteredSpends.forEach(spend => {
                 const gName = resolveGroupName(spend.ad_id, null);
-                if (!groupedAds[gName]) {
-                    groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
-                }
-                if (spend.ad_id) {
-                    groupedAds[gName].adIds.add(spend.ad_id);
-                }
+                if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
+                if (spend.ad_id) groupedAds[gName].adIds.add(spend.ad_id);
                 groupedAds[gName].spend += spend.amount;
             });
 
@@ -557,6 +541,45 @@
             }).sort((a, b) => b.total - a.total);
 
             const formatRupiah = (angka) => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', minimumFractionDigits: 0 }).format(angka || 0);
+
+            if (isCheckingAuth) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gray-100 flex-col gap-4">
+                        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-brand-600"></div>
+                        <p className="text-sm font-semibold text-gray-500">Menghubungkan ke Database...</p>
+                    </div>
+                );
+            }
+
+            if (!user) {
+                return (
+                    <div className="min-h-screen flex items-center justify-center bg-gray-100 p-4">
+                        <div className="bg-white max-w-md w-full rounded-3xl shadow-xl overflow-hidden animate-fade-in border border-gray-200">
+                            <div className="bg-brand-600 p-8 text-center text-white">
+                                <i className="ph-fill ph-lock-key text-5xl mb-2 drop-shadow-md"></i>
+                                <h2 className="text-2xl font-bold">CRM Login</h2>
+                                <p className="text-brand-100 text-sm mt-1 opacity-90">Akses terbatas untuk tim internal.</p>
+                            </div>
+                            <div className="p-8">
+                                <form onSubmit={handleLogin} className="space-y-5">
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-2">Email Address</label>
+                                        <input type="email" required value={loginEmail} onChange={e => setLoginEmail(e.target.value)} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all" placeholder="cs@perusahaan.com" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-gray-600 uppercase tracking-wide mb-2">Password</label>
+                                        <input type="password" required value={loginPassword} onChange={e => setLoginPassword(e.target.value)} className="w-full bg-gray-50 border border-gray-200 rounded-xl p-3 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all" placeholder="••••••••" />
+                                    </div>
+                                    <button type="submit" disabled={loginLoading} className="w-full bg-brand-600 hover:bg-brand-700 text-white font-bold py-3.5 rounded-xl shadow-lg transition-all flex justify-center items-center gap-2 mt-4">
+                                        {loginLoading ? <span className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full"></span> : <><i className="ph-bold ph-sign-in"></i> Masuk Sistem</>}
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                        {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
+                    </div>
+                );
+            }
 
             return (
                 <div className="min-h-screen flex flex-col bg-gray-100">
@@ -569,38 +592,43 @@
                                 </div>
                                 <div>
                                     <h1 className="font-bold text-gray-800 text-lg flex items-center gap-2">
-                                        Meta-Berdu CRM Leads
-                                        <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-semibold">Cloud Sync</span>
+                                        Meta-Berdu CRM
+                                        <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full font-semibold">Secured</span>
                                     </h1>
-                                    <p className="text-xs text-gray-500">{isCloudReady ? 'Tersambung ke Database Real-time' : 'Menghubungkan ke Database...'}</p>
+                                    <p className="text-[11px] text-gray-500 font-medium">Terhubung ke Database: <span className="text-green-600">Online</span></p>
                                 </div>
                             </div>
                             
-                            <div className="flex items-center gap-2 bg-gray-100 p-1 rounded-xl overflow-x-auto w-full md:w-auto">
-                                <button onClick={() => setActiveTab('dashboard')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'dashboard' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
-                                    <i className="ph ph-chart-line-up text-base"></i> Dashboard
-                                </button>
-                                <button onClick={() => setActiveTab('leads')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'leads' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
-                                    <i className="ph ph-tray text-base"></i> Input Leads <span className="bg-brand-100 text-brand-700 text-[10px] px-1.5 py-0.2 rounded-full font-bold">{leads.length}</span>
-                                </button>
-                                <button onClick={() => setActiveTab('ads_manager')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'ads_manager' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
-                                    <i className="ph ph-tag text-base"></i> Master Iklan
-                                </button>
-                                <button onClick={() => setActiveTab('ad_spend')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'ad_spend' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}>
-                                    <i className="ph ph-coins text-base"></i> Biaya Iklan
-                                </button>
+                            <div className="flex items-center gap-4">
+                                <div className="hidden lg:flex items-center gap-2 bg-gray-100 p-1 rounded-xl overflow-x-auto w-full md:w-auto">
+                                    <button onClick={() => setActiveTab('dashboard')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'dashboard' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-chart-line-up text-base"></i> Dashboard</button>
+                                    <button onClick={() => setActiveTab('leads')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'leads' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-tray text-base"></i> Input Leads <span className="bg-brand-100 text-brand-700 text-[10px] px-1.5 py-0.2 rounded-full font-bold">{leads.length}</span></button>
+                                    <button onClick={() => setActiveTab('ads_manager')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'ads_manager' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-tag text-base"></i> Master Iklan</button>
+                                    <button onClick={() => setActiveTab('ad_spend')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'ad_spend' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-coins text-base"></i> Biaya Iklan</button>
+                                </div>
+                                
+                                <div className="flex items-center gap-3 border-l pl-4">
+                                    <div className="text-xs text-gray-500 hidden sm:block font-medium"><i className="ph-fill ph-user-circle text-brand-600 text-sm align-middle mr-1"></i>{user.email}</div>
+                                    <button onClick={handleLogout} className="text-xs font-bold text-red-600 bg-red-50 hover:bg-red-100 px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors border border-red-100"><i className="ph-bold ph-sign-out"></i> Keluar</button>
+                                </div>
                             </div>
+                        </div>
+                        {/* Mobile Nav */}
+                        <div className="lg:hidden flex items-center justify-between bg-gray-50 border-t p-2 overflow-x-auto gap-2">
+                             <button onClick={() => setActiveTab('dashboard')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'dashboard' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-chart-line-up"></i> Dash</button>
+                             <button onClick={() => setActiveTab('leads')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'leads' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-tray"></i> Leads</button>
+                             <button onClick={() => setActiveTab('ads_manager')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'ads_manager' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-tag"></i> Master</button>
+                             <button onClick={() => setActiveTab('ad_spend')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'ad_spend' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-coins"></i> Spend</button>
                         </div>
                     </header>
 
                     <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">
-                        {}
                         {activeTab === 'dashboard' ? (
                             <div className="space-y-6 animate-fade-in">
                                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
                                     <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><i className="ph-fill ph-chart-pie-slice text-brand-600"></i> Dashboard Kinerja</h2>
                                     <div className="flex items-center gap-2 bg-white p-2 rounded-xl shadow-sm border border-gray-200 text-sm">
-                                        <div className="flex items-center gap-2 px-2"><i className="ph ph-calendar-blank text-brand-600"></i><span className="text-gray-600 font-semibold text-xs uppercase">Filter Tanggal:</span></div>
+                                        <div className="flex items-center gap-2 px-2"><i className="ph ph-calendar-blank text-brand-600"></i><span className="text-gray-600 font-semibold text-xs uppercase">Filter Tgl Lead:</span></div>
                                         <input type="date" value={filterStart} onChange={(e) => setFilterStart(e.target.value)} className="border-none bg-gray-50 rounded-lg p-1.5 focus:ring-2 focus:ring-brand-500 outline-none text-gray-700 font-medium cursor-pointer" />
                                         <span className="text-gray-400 font-bold">-</span>
                                         <input type="date" value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} className="border-none bg-gray-50 rounded-lg p-1.5 focus:ring-2 focus:ring-brand-500 outline-none text-gray-700 font-medium cursor-pointer" />
@@ -630,9 +658,7 @@
                                                     <td className="py-3 pr-4">
                                                         <span className="block font-bold text-gray-800">{stat.adName}</span>
                                                         <div className="flex flex-wrap gap-1 mt-1">
-                                                            {stat.adIdsArray.map(id => (
-                                                                <span key={id} className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded inline-block">ID: {id}</span>
-                                                            ))}
+                                                            {stat.adIdsArray.map(id => (<span key={id} className="text-[10px] bg-gray-100 text-gray-500 px-1.5 py-0.5 rounded inline-block">ID: {id}</span>))}
                                                         </div>
                                                     </td>
                                                     <td className="py-3 text-center font-bold">{stat.total}</td><td className="py-3 text-center text-blue-600">{stat.followUp}</td><td className="py-3 text-center text-emerald-600 font-bold bg-emerald-50/50 rounded-lg">{stat.closing}</td><td className="py-3 text-center text-red-500">{stat.lost}</td><td className="py-3 text-right font-semibold text-orange-700">{formatRupiah(stat.spend)}</td><td className="py-3 text-right font-bold text-brand-700">{formatRupiah(stat.revenue)}</td>
@@ -646,7 +672,7 @@
                                     <div className="px-5 py-4 border-b border-gray-100 bg-gray-50"><h3 className="font-bold text-gray-700 flex items-center gap-2"><i className="ph ph-calendar text-brand-600 text-lg"></i> Performa Harian</h3></div>
                                     <div className="overflow-x-auto p-4"><table className="w-full text-left text-sm">
                                         <thead><tr className="border-b-2 border-gray-100 text-gray-500 text-[11px] font-bold uppercase">
-                                            <th className="pb-3 pt-1">Tanggal</th><th className="pb-3 pt-1 text-center">Leads</th><th className="pb-3 pt-1 text-center text-emerald-600">Closing</th><th className="pb-3 pt-1 text-right text-orange-600">Biaya Iklan</th><th className="pb-3 pt-1 text-right text-brand-600">Donasi Masuk</th><th className="pb-3 pt-1 text-center text-purple-600">ROAS Harian</th>
+                                            <th className="pb-3 pt-1">Tgl Lead / Biaya</th><th className="pb-3 pt-1 text-center">Leads</th><th className="pb-3 pt-1 text-center text-emerald-600">Closing</th><th className="pb-3 pt-1 text-right text-orange-600">Biaya Iklan</th><th className="pb-3 pt-1 text-right text-brand-600">Donasi Masuk</th><th className="pb-3 pt-1 text-center text-purple-600">ROAS Harian</th>
                                         </tr></thead>
                                         <tbody className="divide-y divide-gray-100">
                                             {dateStats.map((stat, i) => (
@@ -659,39 +685,39 @@
 
                         ) : activeTab === 'ads_manager' ? (
                             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
-                                <div className="lg:col-span-5 bg-white p-6 rounded-2xl shadow-sm border border-gray-200"><h2 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph ph-plus-circle text-brand-600"></i>Tambah / Edit Nama Iklan</h2><p className="text-xs text-gray-500 mb-5">Petakan ID Konten Meta.</p>
+                                <div className="lg:col-span-5 bg-white p-6 rounded-2xl shadow-sm border border-gray-200"><h2 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph ph-plus-circle text-brand-600"></i>Tambah / Edit Nama Iklan</h2><p className="text-xs text-gray-500 mb-5">Jika Anda memasukkan Nama Iklan yang sama dengan ID berbeda, datanya akan digabung (disatukan).</p>
                                     <form onSubmit={handleAddAdMapping} className="space-y-4">
-                                        <div><label className="block text-xs font-semibold text-gray-700 mb-1">ID Iklan Meta *</label><input type="text" value={newAdId} onChange={e => setNewAdId(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm font-mono outline-none"/></div>
-                                        <div><label className="block text-xs font-semibold text-gray-700 mb-1">Nama Iklan *</label><input type="text" value={newAdName} onChange={e => setNewAdName(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm outline-none"/></div>
+                                        <div><label className="block text-xs font-semibold text-gray-700 mb-1">ID Iklan Meta (utm_content) *</label><input type="text" value={newAdId} onChange={e => setNewAdId(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm font-mono outline-none"/></div>
+                                        <div><label className="block text-xs font-semibold text-gray-700 mb-1">Nama Konten Iklan *</label><input type="text" value={newAdName} onChange={e => setNewAdName(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm outline-none"/></div>
                                         <button type="submit" className="w-full bg-brand-600 text-white font-semibold py-2.5 rounded-xl">Simpan Mapping</button>
                                     </form>
                                 </div>
                                 <div className="lg:col-span-7 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-                                    <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><i className="ph ph-list-checks text-brand-600"></i> Daftar Mapping ({adMappings.length})</h2>
+                                    <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><i className="ph ph-list-checks text-brand-600"></i> Daftar Iklan Terpetakan ({adMappings.length})</h2>
                                     <div className="overflow-x-auto"><table className="w-full text-left text-sm">
-                                        <thead><tr className="border-b bg-gray-50 text-gray-600 text-xs uppercase"><th className="p-3">ID Iklan</th><th className="p-3">Nama Iklan</th><th className="p-3 text-right">Aksi</th></tr></thead>
-                                        <tbody>{adMappings.map(m => (<tr key={m.id} className="border-b"><td className="p-3 font-mono text-xs">{m.id}</td><td className="p-3 font-semibold">{m.name}</td><td className="p-3 text-right"><button onClick={() => handleDeleteAdMapping(m.id)} className="text-red-500"><i className="ph ph-trash"></i></button></td></tr>))}</tbody>
+                                        <thead><tr className="border-b bg-gray-50 text-gray-600 text-xs uppercase"><th className="p-3">Nama Iklan</th><th className="p-3">ID Meta Tergabung</th><th className="p-3 text-right">Hapus Semua ID</th></tr></thead>
+                                        <tbody>{adMappings.map((m, idx) => (<tr key={idx} className="border-b"><td className="p-3 font-bold text-gray-800">{m.name}</td><td className="p-3 font-mono text-xs text-gray-500">{m.mappedIds.map(id => <span key={id} className="block bg-gray-100 px-1 py-0.5 rounded mb-1 w-max">ID: {id}</span>)}</td><td className="p-3 text-right"><button onClick={() => m.mappedIds.forEach(id => handleDeleteAdMapping(id))} className="text-red-500 bg-red-50 p-2 rounded-lg hover:bg-red-100 transition-colors"><i className="ph ph-trash"></i></button></td></tr>))}</tbody>
                                     </table></div>
                                 </div>
                             </div>
 
                         ) : activeTab === 'ad_spend' ? (
                             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
-                                <div className="lg:col-span-4 flex flex-col gap-4 self-start">
+                                <div className="lg:col-span-5 flex flex-col gap-4 self-start">
                                     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
                                         <h2 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph-fill ph-file-csv text-brand-600"></i> Import CSV Meta Ads</h2>
-                                        <p className="text-xs text-gray-500 mb-5">Upload file laporan Meta CSV. Otomatis membaca Tgl Awal Pelaporan, ID Iklan, & Biaya.</p>
+                                        <p className="text-xs text-gray-500 mb-5">Otomatis membaca Tgl Awal Pelaporan, ID Iklan, Nama Iklan & Biaya (IDR/USD).</p>
                                         <div className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors relative ${isDragging ? 'border-brand-500 bg-brand-50' : 'border-gray-300 bg-gray-50'}`} onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={(e) => { e.preventDefault(); setIsDragging(false); if(e.dataTransfer.files) handleImportCSV({ target: { files: e.dataTransfer.files } }); }}>
                                             <input type="file" accept=".csv" onChange={handleImportCSV} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
-                                            <i className="ph ph-upload-simple text-4xl text-brand-500 mb-3 block"></i><p className="text-sm font-semibold text-gray-700">Tarik & Lepas File CSV</p>
+                                            <i className="ph ph-upload-simple text-4xl text-brand-500 mb-3 block"></i><p className="text-sm font-semibold text-gray-700">Tarik & Lepas Laporan CSV</p>
                                         </div>
                                     </div>
                                 </div>
-                                <div className="lg:col-span-8 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
+                                <div className="lg:col-span-7 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
                                     <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><i className="ph ph-table text-brand-600"></i> Riwayat Biaya Iklan</h2>
                                     <div className="overflow-x-auto"><table className="w-full text-left text-sm">
-                                        <thead><tr className="border-b bg-gray-50 text-gray-600 text-xs uppercase"><th className="p-3">Tgl Laporan</th><th className="p-3">Konten Iklan</th><th className="p-3 text-right">Biaya (Rp)</th><th className="p-3 text-center">Hapus</th></tr></thead>
-                                        <tbody>{adSpends.map(s => (<tr key={s.id} className="border-b"><td className="p-3 font-semibold">{s.date}</td><td className="p-3">{getAdDisplayName(s.ad_id) || s.ad_id}<span className="block text-[10px] text-gray-400">ID: {s.ad_id}</span></td><td className="p-3 text-right font-bold text-orange-600">{formatRupiah(s.amount)}</td><td className="p-3 text-center"><button onClick={() => handleDeleteSpend(s.id)} className="text-red-500"><i className="ph ph-trash"></i></button></td></tr>))}</tbody>
+                                        <thead><tr className="border-b bg-gray-50 text-gray-600 text-xs uppercase"><th className="p-3">Tgl Laporan</th><th className="p-3">Konten Iklan</th><th className="p-3 text-right">Biaya (Rp)</th><th className="p-3 text-center">Aksi</th></tr></thead>
+                                        <tbody>{adSpends.map(s => (<tr key={s.id} className="border-b"><td className="p-3 font-semibold">{s.date}</td><td className="p-3 font-medium text-gray-800">{getAdDisplayName(s.ad_id) || `ID: ${s.ad_id}`}<span className="block text-[10px] text-gray-400">ID Meta: {s.ad_id}</span></td><td className="p-3 text-right font-bold text-orange-600">{formatRupiah(s.amount)}</td><td className="p-3 text-center"><button onClick={() => handleDeleteSpend(s.id)} className="text-red-500 hover:text-red-700"><i className="ph ph-trash"></i></button></td></tr>))}</tbody>
                                     </table></div>
                                 </div>
                             </div>
@@ -699,55 +725,56 @@
                         ) : (
                             <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start animate-fade-in">
                                 <div className="lg:col-span-4 flex flex-col gap-4">
-                                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200"><div className="px-5 py-4 border-b bg-gray-50"><h2 className="font-semibold text-gray-700 flex items-center gap-2"><i className="ph ph-clipboard-text text-brand-600 text-lg"></i> Input Data Berdu</h2></div><div className="p-5"><textarea className="w-full border rounded-xl p-3 text-sm outline-none h-40" placeholder="Paste pesan WA dari Berdu di sini..." value={rawText} onChange={handleTextChange}></textarea></div></div>
+                                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200"><div className="px-5 py-4 border-b bg-gray-50"><h2 className="font-semibold text-gray-700 flex items-center gap-2"><i className="ph ph-clipboard-text text-brand-600 text-lg"></i> Input Data Berdu</h2></div><div className="p-5"><textarea className="w-full border rounded-xl p-3 text-sm outline-none h-40 focus:ring-2 focus:ring-brand-500 transition-all" placeholder="Paste pesan WA pertama dari Berdu di sini..." value={rawText} onChange={handleTextChange}></textarea></div></div>
                                     {parsedData && (
-                                        <div className="bg-white rounded-2xl shadow-sm border border-brand-200"><div className="px-5 py-3 bg-brand-50 border-b border-brand-100"><span className="text-sm font-bold text-brand-700 flex items-center gap-1.5"><i className="ph ph-magic-wand"></i> Hasil Ekstraksi</span></div>
+                                        <div className="bg-white rounded-2xl shadow-sm border border-brand-200 overflow-hidden"><div className="px-5 py-3 bg-brand-50 border-b border-brand-100"><span className="text-sm font-bold text-brand-700 flex items-center gap-1.5"><i className="ph ph-magic-wand"></i> Hasil Ekstraksi Otomatis</span></div>
                                         <div className="p-5 space-y-4">
-                                            <div className="bg-emerald-50/80 p-3 rounded-xl border border-emerald-100"><div className="flex items-start justify-between gap-2"><div><p className="text-xs text-emerald-700 font-medium">Nama Konten Iklan:</p>{getAdDisplayName(parsedData.ad_id) || parsedData.ad_name ? (<p className="font-bold text-gray-800 text-sm mt-0.5"><i className="ph-fill ph-film-strip text-emerald-600"></i> {getAdDisplayName(parsedData.ad_id) || parsedData.ad_name}</p>) : (<p className="text-xs text-red-500 italic mt-0.5">⚠️ Belum diberi nama</p>)}</div>{!getAdDisplayName(parsedData.ad_id) && !parsedData.ad_name && parsedData.ad_id !== "Tidak ada ID" && (<button onClick={() => setMappingModal({ open: true, adId: parsedData.ad_id, adName: '' })} className="text-xs bg-white text-emerald-700 border border-emerald-300 px-2.5 py-1 rounded-lg font-bold shadow-sm">+ Beri Nama</button>)}</div></div>
+                                            <div className="bg-emerald-50/80 p-3 rounded-xl border border-emerald-100"><div className="flex items-start justify-between gap-2"><div><p className="text-xs text-emerald-700 font-medium">Nama Konten Iklan:</p>{getAdDisplayName(parsedData.ad_id) || parsedData.ad_name ? (<p className="font-bold text-gray-800 text-sm mt-0.5"><i className="ph-fill ph-film-strip text-emerald-600"></i> {getAdDisplayName(parsedData.ad_id) || parsedData.ad_name}</p>) : (<p className="text-xs text-red-500 italic mt-0.5 font-semibold">⚠️ Iklan baru, belum diberi nama</p>)}</div>{!getAdDisplayName(parsedData.ad_id) && !parsedData.ad_name && parsedData.ad_id !== "Tidak ada ID" && (<button onClick={() => setMappingModal({ open: true, adId: parsedData.ad_id, adName: '' })} className="text-[11px] bg-white text-emerald-700 border border-emerald-300 px-2.5 py-1.5 rounded-lg font-bold shadow-sm whitespace-nowrap">+ Beri Nama</button>)}</div></div>
                                             <div className="grid grid-cols-2 gap-3">
-                                                <div><label className="text-xs text-gray-500 block">Sapaan</label><input type="text" value={parsedData.sapaan || ''} onChange={e => handleFieldChange('sapaan', e.target.value)} className="w-full border rounded-lg p-2 text-sm" /></div>
-                                                <div><label className="text-xs text-gray-500 block">Nama Lengkap</label><input type="text" value={parsedData.nama_lengkap || ''} onChange={e => handleFieldChange('nama_lengkap', e.target.value)} className="w-full border rounded-lg p-2 text-sm" /></div>
-                                                <div><label className="text-xs text-gray-500 block">No WhatsApp</label><input type="text" value={parsedData.no_wa || ''} onChange={e => handleFieldChange('no_wa', e.target.value)} className="w-full border rounded-lg p-2 text-sm" /></div>
-                                                <div><label className="text-xs text-gray-500 block">Tgl Lead Masuk *</label><input type="date" value={parsedData.lead_date || ''} onChange={e => handleFieldChange('lead_date', e.target.value)} className="w-full border rounded-lg p-2 text-sm" /></div>
-                                                <div><label className="text-xs text-gray-500 block">Nominal (Angka)</label><input type="text" value={parsedData.nominal || ''} onChange={e => handleFieldChange('nominal', e.target.value)} className="w-full border rounded-lg p-2 text-sm" /></div>
-                                                <div><label className="text-xs text-gray-500 block">Nama Orang Tua</label><input type="text" value={parsedData.nama_ortu || ''} onChange={e => handleFieldChange('nama_ortu', e.target.value)} className="w-full border rounded-lg p-2 text-sm" /></div>
-                                                <div className="col-span-2"><label className="text-xs text-gray-500 block">Tulis Doa Di Sini</label><textarea value={parsedData.doa || ''} onChange={e => handleFieldChange('doa', e.target.value)} className="w-full border rounded-lg p-2 text-sm h-16 resize-none"></textarea></div>
+                                                <div><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide block mb-1">Sapaan</label><input type="text" value={parsedData.sapaan || ''} onChange={e => handleFieldChange('sapaan', e.target.value)} className="w-full border rounded-lg p-2.5 text-sm outline-none" placeholder="Bpk/Ibu/Kak"/></div>
+                                                <div><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide block mb-1">Nama Lengkap</label><input type="text" value={parsedData.nama_lengkap || ''} onChange={e => handleFieldChange('nama_lengkap', e.target.value)} className="w-full border rounded-lg p-2.5 text-sm outline-none font-semibold text-gray-800" /></div>
+                                                <div><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide block mb-1">No WhatsApp</label><input type="text" value={parsedData.no_wa || ''} onChange={e => handleFieldChange('no_wa', e.target.value)} className="w-full border rounded-lg p-2.5 text-sm outline-none font-medium text-blue-600" /></div>
+                                                <div><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide block mb-1">Tgl Lead Masuk *</label><input type="date" value={parsedData.lead_date || ''} onChange={e => handleFieldChange('lead_date', e.target.value)} className="w-full border rounded-lg p-2.5 text-sm outline-none font-medium" /></div>
+                                                <div><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide block mb-1">Nominal Awal</label><input type="text" value={parsedData.nominal || ''} onChange={e => handleFieldChange('nominal', e.target.value)} className="w-full border rounded-lg p-2.5 text-sm outline-none font-semibold text-gray-800" /></div>
+                                                <div><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide block mb-1">Nama Orang Tua</label><input type="text" value={parsedData.nama_ortu || ''} onChange={e => handleFieldChange('nama_ortu', e.target.value)} className="w-full border rounded-lg p-2.5 text-sm outline-none" placeholder="Bin / Binti" /></div>
+                                                <div className="col-span-2"><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide block mb-1">Tulis Doa Di Sini</label><textarea value={parsedData.doa || ''} onChange={e => handleFieldChange('doa', e.target.value)} className="w-full border rounded-lg p-2.5 text-sm h-20 resize-none outline-none text-gray-700 italic" placeholder="Doa donatur..."></textarea></div>
                                             </div>
-                                            <button onClick={handleSave} className="w-full bg-brand-600 hover:bg-brand-700 text-white font-semibold py-2.5 rounded-xl shadow-sm flex items-center justify-center gap-2"><i className="ph ph-cloud-arrow-up"></i> Simpan Data Lead (Cloud)</button>
+                                            <button onClick={handleSave} className="w-full bg-brand-600 hover:bg-brand-700 text-white font-bold py-3 rounded-xl shadow-md transition-all flex items-center justify-center gap-2 mt-2"><i className="ph-bold ph-cloud-arrow-up text-lg"></i> Simpan Data Lead</button>
                                         </div></div>
                                     )}
                                 </div>
                                 <div className="lg:col-span-8">
-                                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 h-full min-h-[500px] flex flex-col"><div className="px-6 py-4 border-b bg-gray-50 flex justify-between"><h2 className="font-semibold text-gray-700 flex items-center gap-2"><i className="ph ph-database text-brand-600 text-lg"></i> Database Leads ({leads.length})</h2></div>
+                                    <div className="bg-white rounded-2xl shadow-sm border border-gray-200 h-full min-h-[600px] flex flex-col"><div className="px-6 py-4 border-b bg-gray-50 flex justify-between"><h2 className="font-semibold text-gray-700 flex items-center gap-2"><i className="ph ph-database text-brand-600 text-lg"></i> Database Leads ({leads.length})</h2></div>
                                         <div className="p-4 flex-1 overflow-auto bg-gray-50/50">
                                             <div className="space-y-4">
                                                 {leads.map((lead) => {
                                                     const resolvedAdName = getAdDisplayName(lead.ad_id) || lead.ad_name;
                                                     return (
-                                                        <div key={lead.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm relative group">
-                                                            <button onClick={() => deleteLead(lead.id)} className="absolute top-4 right-4 text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100"><i className="ph ph-trash text-lg"></i></button>
+                                                        <div key={lead.id} className="bg-white p-5 rounded-xl border border-gray-200 shadow-sm relative group hover:border-brand-300 transition-colors">
+                                                            <button onClick={() => deleteLead(lead.id)} className="absolute top-4 right-4 text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all bg-white p-1 rounded-md shadow-sm"><i className="ph ph-trash text-lg"></i></button>
                                                             <div className="flex flex-col md:flex-row md:items-start justify-between gap-4"><div className="flex-1">
-                                                                <div className="mb-2.5 flex items-center gap-2">{resolvedAdName ? (<span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-brand-50 text-brand-700 border border-brand-200"><i className="ph-fill ph-megaphone text-brand-600"></i> {resolvedAdName}</span>) : (<button onClick={() => setMappingModal({ open: true, adId: lead.ad_id, adName: '' })} className="inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200">ID: {lead.ad_id} (+ Nama Iklan)</button>)}</div>
+                                                                <div className="mb-2.5 flex items-center gap-2">{resolvedAdName ? (<span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-brand-50 text-brand-700 border border-brand-200"><i className="ph-fill ph-megaphone text-brand-600"></i> {resolvedAdName}</span>) : (<button onClick={() => setMappingModal({ open: true, adId: lead.ad_id, adName: '' })} className="inline-flex items-center px-2.5 py-0.5 rounded-lg text-xs font-semibold bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100 transition-colors">ID: {lead.ad_id} (+ Beri Nama)</button>)}</div>
                                                                 <h3 className="font-bold text-gray-800 text-lg mb-1">{lead.sapaan ? `${lead.sapaan} ` : ''}{lead.nama_lengkap}</h3>
-                                                                <p className="text-xs text-gray-500 mb-3"><i className="ph ph-calendar"></i> Tgl Lead: <strong>{lead.lead_date || lead.dateOnly}</strong></p>
+                                                                <p className="text-xs text-gray-500 mb-3 flex items-center gap-1.5"><i className="ph ph-calendar"></i> Tgl Lead: <strong className="text-gray-700">{lead.lead_date || lead.dateOnly}</strong></p>
                                                                 
-                                                                <div className="grid grid-cols-2 gap-4 text-sm bg-gray-50 p-3 rounded-lg border mb-2"><div><span className="block text-xs text-gray-400">Nominal Awal</span><span className="font-semibold">{formatRupiah(lead.nominal)}</span></div><div><span className="block text-xs text-gray-400">No. WhatsApp</span><span className="font-semibold text-blue-600">{lead.no_wa}</span></div></div>
+                                                                <div className="grid grid-cols-2 gap-4 text-sm bg-gray-50 p-3 rounded-xl border mb-3"><div><span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wide">Nominal Awal</span><span className="font-bold text-gray-700">{formatRupiah(lead.nominal)}</span></div><div><span className="block text-[10px] font-bold text-gray-400 uppercase tracking-wide">No. WhatsApp</span><a href={`https://wa.me/${lead.no_wa?.replace(/^0/, '62')}`} target="_blank" className="font-bold text-blue-600 flex items-center gap-1 hover:underline"><i className="ph-fill ph-whatsapp-logo text-green-500"></i> {lead.no_wa}</a></div></div>
                                                                 
                                                                 {(lead.nama_ortu || lead.doa) && (
-                                                                    <div className="text-xs bg-brand-50 p-3 rounded-lg border border-brand-100 mb-2 space-y-1">
-                                                                        {lead.nama_ortu && <div><span className="font-semibold text-brand-700">Ortu:</span> <span className="text-gray-700">{lead.nama_ortu}</span></div>}
-                                                                        {lead.doa && <div><span className="font-semibold text-brand-700">Doa:</span> <span className="text-gray-700 italic">"{lead.doa}"</span></div>}
+                                                                    <div className="text-sm bg-green-50/50 p-3 rounded-xl border border-green-100 mb-2 space-y-1.5">
+                                                                        {lead.nama_ortu && <div className="flex gap-2"><span className="font-bold text-green-700 text-xs mt-0.5 w-10">Ortu:</span> <span className="text-gray-700 text-xs font-medium">{lead.nama_ortu}</span></div>}
+                                                                        {lead.doa && <div className="flex gap-2"><span className="font-bold text-green-700 text-xs mt-0.5 w-10">Doa:</span> <span className="text-gray-700 text-xs italic">"{lead.doa}"</span></div>}
                                                                     </div>
                                                                 )}
 
-                                                                {lead.status === 'Closing' && (<div className="mt-3 bg-emerald-50 p-3 rounded-lg border border-emerald-200 flex justify-between gap-3"><div><span className="block text-xs font-bold text-emerald-700">Nominal Closing Aktual</span></div><input type="number" value={lead.nominal_closing || lead.nominal || ''} onChange={(e) => updateLeadData(lead.id, 'nominal_closing', e.target.value)} className="w-32 border rounded-lg p-2 text-sm font-semibold text-right" placeholder="0"/></div>)}
+                                                                {lead.status === 'Closing' && (<div className="mt-3 bg-emerald-50 p-3 rounded-xl border border-emerald-200 flex justify-between items-center gap-3"><div><span className="block text-xs font-bold text-emerald-800">💰 Nominal Transfer Aktual</span><span className="block text-[10px] text-emerald-600">Pastikan angka ini sesuai mutasi masuk</span></div><input type="number" value={lead.nominal_closing || lead.nominal || ''} onChange={(e) => updateLeadData(lead.id, 'nominal_closing', e.target.value)} className="w-36 border border-emerald-300 rounded-lg p-2.5 text-sm font-bold text-right text-emerald-900 bg-white focus:ring-2 focus:ring-emerald-500 outline-none" placeholder="0"/></div>)}
                                                             </div>
-                                                            <div className="w-full md:w-48 shrink-0 flex flex-col gap-2"><label className="text-xs font-semibold text-gray-500">Status Lead</label>
-                                                                <select value={lead.status} onChange={(e) => updateStatus(lead.id, e.target.value)} className={`w-full border rounded-xl p-2.5 text-sm font-semibold outline-none ${lead.status === 'Follow Up' ? 'bg-yellow-50 text-yellow-700' : lead.status === 'Closing' ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}><option value="Follow Up">⏳ Follow Up</option><option value="Closing">✅ Closing</option><option value="Lost">❌ Lost</option></select>
+                                                            <div className="w-full md:w-52 shrink-0 flex flex-col gap-2"><label className="text-[11px] font-bold text-gray-500 uppercase tracking-wide">Status Lead</label>
+                                                                <select value={lead.status} onChange={(e) => updateStatus(lead.id, e.target.value)} className={`w-full border rounded-xl p-3 text-sm font-bold outline-none shadow-sm cursor-pointer transition-colors ${lead.status === 'Follow Up' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' : lead.status === 'Closing' ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-red-50 text-red-700 border-red-200'}`}><option value="Follow Up">⏳ Follow Up</option><option value="Closing">✅ Closing (Donasi)</option><option value="Lost">❌ Lost (Batal)</option></select>
                                                             </div></div>
                                                         </div>
                                                     );
                                                 })}
+                                                {leads.length === 0 && <div className="text-center py-10 text-gray-400"><i className="ph ph-empty text-4xl mb-2"></i><p className="text-sm">Belum ada data leads.</p></div>}
                                             </div>
                                         </div>
                                     </div>
@@ -756,10 +783,9 @@
                         )}
                     </main>
 
-                    {}
                     {mappingModal.open && (
-                        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
-                            <div className="bg-white rounded-2xl w-full max-w-md p-6"><h3 className="text-lg font-bold text-gray-800 mb-4">Beri Nama Iklan</h3><div className="mb-4"><label className="block text-xs font-semibold text-gray-700 mb-1">Nama Konten Iklan</label><input type="text" value={mappingModal.adName} onChange={e => setMappingModal(prev => ({ ...prev, adName: e.target.value }))} className="w-full border rounded-xl p-2.5 text-sm" autoFocus/></div><div className="flex justify-end gap-2"><button onClick={() => setMappingModal({ open: false, adId: '', adName: '' })} className="px-4 py-2 rounded-xl text-xs font-semibold bg-gray-100">Batal</button><button onClick={handleQuickSaveMapping} className="px-4 py-2 rounded-xl text-xs font-semibold bg-brand-600 text-white">Simpan</button></div></div>
+                        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
+                            <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl"><h3 className="text-xl font-bold text-gray-800 mb-1">Beri Nama Konten Iklan</h3><p className="text-xs text-gray-500 mb-4">ID Meta: <code className="bg-gray-100 px-1 rounded text-brand-600">{mappingModal.adId}</code></p><div className="mb-5"><label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wide mb-1.5">Nama Iklan</label><input type="text" value={mappingModal.adName} onChange={e => setMappingModal(prev => ({ ...prev, adName: e.target.value }))} className="w-full border border-gray-300 focus:border-brand-500 rounded-xl p-3 text-sm outline-none focus:ring-2 focus:ring-brand-200 transition-all" autoFocus placeholder="Cth: Video Wakaf Sedekah 01"/></div><div className="flex justify-end gap-3"><button onClick={() => setMappingModal({ open: false, adId: '', adName: '' })} className="px-5 py-2.5 rounded-xl text-sm font-bold bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors">Batal</button><button onClick={handleQuickSaveMapping} className="px-5 py-2.5 rounded-xl text-sm font-bold bg-brand-600 text-white hover:bg-brand-700 shadow-md transition-colors">Simpan Nama</button></div></div>
                         </div>
                     )}
                     {toast && <Toast message={toast.message} type={toast.type} onClose={() => setToast(null)} />}
