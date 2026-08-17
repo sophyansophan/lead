@@ -20,7 +20,7 @@
         import { getAuth, signInAnonymously, signInWithCustomToken, signInWithEmailAndPassword, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, doc, setDoc, updateDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Mengekspos modul Firebase ke window
+        // Mengekspos modul Firebase ke window agar bisa diakses React
         window.FB = { 
             initializeApp, getAuth, signInAnonymously, signInWithCustomToken, 
             signInWithEmailAndPassword, signOut, onAuthStateChanged,
@@ -57,6 +57,7 @@
     <script type="text/babel">
         const { useState, useEffect } = React;
 
+        // Fungsi mengekstrak data dari teks Berdu
         const parseBerduText = (text, adMappings = []) => {
             let ad_id = "";
             let campaign_id = "";
@@ -74,7 +75,6 @@
                 } catch(e) { console.error("URL Invalid", e); }
             }
 
-            // Temukan mapping berdasarkan array ID yang sudah disatukan
             const mappedAd = adMappings.find(m => m.mappedIds && m.mappedIds.includes(ad_id));
             const ad_name = mappedAd ? mappedAd.name : null;
 
@@ -127,6 +127,7 @@
             return arr;
         };
 
+        // Komponen Notifikasi
         const Toast = ({ message, type, onClose }) => {
             useEffect(() => {
                 const timer = setTimeout(onClose, 3000);
@@ -152,28 +153,32 @@
             const [loginPassword, setLoginPassword] = useState("");
             const [loginLoading, setLoginLoading] = useState(false);
             
+            // Data States
             const [leads, setLeads] = useState([]);
-            const [rawAdMappings, setRawAdMappings] = useState([]); // Raw dari DB
+            const [rawAdMappings, setRawAdMappings] = useState([]); 
             const [adSpends, setAdSpends] = useState([]);
             
+            // Form & UI States
             const [rawText, setRawText] = useState("");
             const [parsedData, setParsedData] = useState(null);
             const [toast, setToast] = useState(null);
             const [activeTab, setActiveTab] = useState('leads');
             const [isDragging, setIsDragging] = useState(false);
+            const [isDraggingLeads, setIsDraggingLeads] = useState(false);
             const [mappingModal, setMappingModal] = useState({ open: false, adId: '', adName: '' });
 
-            // --- State untuk Fitur Search, Filter & Sort ---
+            // Fitur Search, Filter & Sort Leads
             const [searchTerm, setSearchTerm] = useState("");
             const [statusFilter, setStatusFilter] = useState("All");
             const [sortBy, setSortBy] = useState("newest");
-
             const [leadListStartDate, setLeadListStartDate] = useState("");
             const [leadListEndDate, setLeadListEndDate] = useState("");
 
+            // Add Mapping States
             const [newAdId, setNewAdId] = useState("");
             const [newAdName, setNewAdName] = useState("");
 
+            // Dashboard Filter States
             const [filterStart, setFilterStart] = useState(() => {
                 const d = new Date(); d.setDate(1); return d.toISOString().split('T')[0];
             });
@@ -184,8 +189,6 @@
             useEffect(() => {
                 const initFirebase = async () => {
                     const envConfig = typeof __firebase_config !== 'undefined' ? __firebase_config : null;
-                    
-                    // JIKA DI GITHUB: Pastikan Config ini diisi sesuai akun Firebase Anda
                     const githubConfig = {
                         apiKey: "AIzaSyAgP7wTZpCNC6K74_EWWGvWKUudoMEX3dw",
                         authDomain: "lead-b8699.firebaseapp.com",
@@ -194,7 +197,6 @@
                         messagingSenderId: "878245874778",
                         appId: "1:878245874778:web:7cd0ddf6e8c4c44070dc63"
                     };
-                    
                     const finalConfig = envConfig ? JSON.parse(envConfig) : githubConfig;
 
                     if (!finalConfig.apiKey) {
@@ -207,28 +209,18 @@
                         const app = window.FB.initializeApp(finalConfig);
                         const db = window.FB.getFirestore(app);
                         const auth = window.FB.getAuth(app);
-                        
                         setFbApp({ db, auth });
 
-                        // Logika Auth: Bypass Otomatis hanya untuk Immersive Web App
                         if (typeof __initial_auth_token !== 'undefined') {
                             await window.FB.signInWithCustomToken(auth, __initial_auth_token);
                         }
                         
-                        // Listener status login
                         window.FB.onAuthStateChanged(auth, (currentUser) => {
-                            if (currentUser) {
-                                setUser(currentUser);
-                                setIsCloudReady(true);
-                            } else {
-                                setUser(null);
-                                setIsCloudReady(false);
-                            }
+                            if (currentUser) { setUser(currentUser); setIsCloudReady(true); } 
+                            else { setUser(null); setIsCloudReady(false); }
                             setIsCheckingAuth(false);
                         });
-
                     } catch(err) {
-                        console.error("Gagal inisialisasi Firebase", err);
                         setToast({ type: 'error', message: 'Gagal inisialisasi sistem.' });
                         setIsCheckingAuth(false);
                     }
@@ -241,7 +233,6 @@
 
             useEffect(() => {
                 if (!isCloudReady || !fbApp || !user) return;
-
                 const db = fbApp.db;
                 
                 const leadsRef = window.FB.collection(db, 'artifacts', APP_ID, 'public', 'data', 'leads');
@@ -266,7 +257,6 @@
                 return () => { unsubLeads(); unsubMap(); unsubSpend(); };
             }, [isCloudReady, fbApp, user]);
 
-            // --- Fungsi Autentikasi (Login & Logout) ---
             const handleLogin = async (e) => {
                 e.preventDefault();
                 setLoginLoading(true);
@@ -289,7 +279,6 @@
                 } catch(e) {}
             };
 
-            // --- Logika Penyatuan ID berdasarkan Nama ---
             const adMappings = React.useMemo(() => {
                 const grouped = {};
                 rawAdMappings.forEach(item => {
@@ -411,7 +400,111 @@
                 } catch(e) {}
             };
 
-            const handleImportCSV = async (e) => {
+            const handleExportLeads = () => {
+                if (leads.length === 0) {
+                    setToast({ type: 'warning', message: 'Tidak ada data untuk diekspor.' });
+                    return;
+                }
+                const headers = ['ID', 'Tgl Masuk', 'Sapaan', 'Nama Lengkap', 'No WA', 'Nominal Awal', 'ID Iklan', 'Nama Iklan', 'Status', 'Tgl Closing', 'Nominal Closing', 'Nama Ortu', 'Doa'];
+                const csvRows = [headers.join(',')];
+
+                leads.forEach(l => {
+                    const escapeCsv = (str) => `"${(str || '').toString().replace(/"/g, '""')}"`;
+                    const adName = getAdDisplayName(l.ad_id) || l.ad_name || '';
+                    
+                    const row = [
+                        escapeCsv(l.id), escapeCsv(l.lead_date || l.dateOnly), escapeCsv(l.sapaan),
+                        escapeCsv(l.nama_lengkap), escapeCsv(l.no_wa), escapeCsv(l.nominal),
+                        escapeCsv(l.ad_id), escapeCsv(adName), escapeCsv(l.status),
+                        escapeCsv(l.tanggal_closing), escapeCsv(l.nominal_closing),
+                        escapeCsv(l.nama_ortu), escapeCsv(l.doa)
+                    ];
+                    csvRows.push(row.join(','));
+                });
+
+                const blob = new Blob([csvRows.join('\n')], { type: 'text/csv' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `Export_Leads_${new Date().toISOString().split('T')[0]}.csv`;
+                a.click();
+                URL.revokeObjectURL(url);
+            };
+
+            const handleImportLeads = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+
+                const reader = new FileReader();
+                reader.onload = async (event) => {
+                    const text = event.target.result;
+                    const parsedCsv = parseCSV(text);
+                    if (parsedCsv.length < 2) { setToast({ type: 'error', message: 'CSV kosong atau format salah.' }); return; }
+
+                    const headers = parsedCsv[0].map(h => h.toString().toLowerCase().trim().replace(/[\u200B-\u200D\uFEFF]/g, ''));
+                    const getIdx = (keywords) => headers.findIndex(h => keywords.some(k => h.includes(k)));
+                    
+                    const idxId = getIdx(['id']);
+                    const idxTglMasuk = getIdx(['tgl masuk', 'tanggal masuk', 'lead_date', 'tanggal']);
+                    const idxSapaan = getIdx(['sapaan']);
+                    const idxNama = getIdx(['nama lengkap', 'nama']);
+                    const idxWa = getIdx(['no wa', 'whatsapp', 'wa', 'phone']);
+                    const idxNominal = getIdx(['nominal awal', 'nominal']);
+                    const idxAdId = getIdx(['id iklan', 'ad_id', 'utm_content']);
+                    const idxStatus = getIdx(['status']);
+                    const idxTglClosing = getIdx(['tgl closing', 'tanggal closing']);
+                    const idxNominalClosing = getIdx(['nominal closing']);
+                    const idxOrtu = getIdx(['nama ortu', 'ortu']);
+                    const idxDoa = getIdx(['doa', 'pesan']);
+
+                    if (idxNama === -1 || idxWa === -1) {
+                        setToast({ type: 'error', message: 'Gagal impor: Kolom "Nama Lengkap" dan "No WA" wajib ada di baris pertama CSV.' });
+                        return;
+                    }
+
+                    if (!isCloudReady) { setToast({ type: 'error', message: 'Koneksi terputus, gagal impor.' }); return; }
+
+                    let importedCount = 0;
+                    setToast({ type: 'success', message: 'Memulai sinkronisasi impor data ke Cloud...' });
+
+                    for (let i = 1; i < parsedCsv.length; i++) {
+                        const row = parsedCsv[i];
+                        if (!row || row.length === 0) continue;
+                        
+                        const namaVal = row[idxNama]?.trim();
+                        const waVal = row[idxWa]?.trim();
+                        if (!namaVal && !waVal) continue; 
+
+                        const leadId = (idxId !== -1 && row[idxId]) ? row[idxId].trim() : Date.now().toString() + i;
+                        const leadData = {
+                            id: leadId, created_at: Date.now() + i, 
+                            lead_date: (idxTglMasuk !== -1 && row[idxTglMasuk]) ? row[idxTglMasuk].trim() : new Date().toISOString().split('T')[0],
+                            sapaan: (idxSapaan !== -1 && row[idxSapaan]) ? row[idxSapaan].trim() : '',
+                            nama_lengkap: namaVal || '', no_wa: waVal || '',
+                            nominal: (idxNominal !== -1 && row[idxNominal]) ? row[idxNominal].replace(/\D/g, '') : '',
+                            ad_id: (idxAdId !== -1 && row[idxAdId] && row[idxAdId].trim() !== '') ? row[idxAdId].trim() : 'Organic',
+                            status: (idxStatus !== -1 && row[idxStatus] && row[idxStatus].trim() !== '') ? row[idxStatus].trim() : 'Follow Up',
+                            tanggal_closing: (idxTglClosing !== -1 && row[idxTglClosing]) ? row[idxTglClosing].trim() : '',
+                            nominal_closing: (idxNominalClosing !== -1 && row[idxNominalClosing]) ? row[idxNominalClosing].replace(/\D/g, '') : '',
+                            nama_ortu: (idxOrtu !== -1 && row[idxOrtu]) ? row[idxOrtu].trim() : '',
+                            doa: (idxDoa !== -1 && row[idxDoa]) ? row[idxDoa].trim() : '',
+                        };
+
+                        try {
+                            const docRef = window.FB.doc(fbApp.db, 'artifacts', APP_ID, 'public', 'data', 'leads', leadId);
+                            await window.FB.setDoc(docRef, leadData);
+                            importedCount++;
+                        } catch(e) { console.error("Gagal simpan", e); }
+                    }
+
+                    if (importedCount > 0) setToast({ type: 'success', message: `${importedCount} Leads berhasil diimpor!` });
+                    else setToast({ type: 'warning', message: 'Tidak ada data valid yang diimpor.' });
+                };
+                reader.readAsText(file);
+                e.target.value = null;
+            };
+
+            const handleImportCSVSpend = async (e) => {
                 const file = e.target.files[0];
                 if (!file) return;
 
@@ -456,7 +549,7 @@
                             const p = rawDate.split('-');
                             if(p.length === 3) rawDate = p[2].length === 4 ? `${p[2]}-${p[1].padStart(2, '0')}-${p[0].padStart(2, '0')}` : `${p[0]}-${p[1].padStart(2, '0')}-${p[2].padStart(2, '0')}`;
                         }
-                        if (!rawDate.match(/^\d{4}-\d{2}-\d{2}$/)) rawDate = new Date().toISOString().split('T')[0]; // Fallback if messed up
+                        if (!rawDate.match(/^\d{4}-\d{2}-\d{2}$/)) rawDate = new Date().toISOString().split('T')[0];
 
                         let rawSpend = row[spendIdx] ? row[spendIdx].toString().replace(/[^0-9,.-]/g, '') : "0";
                         if (rawSpend.includes(',') && rawSpend.includes('.')) {
@@ -489,16 +582,13 @@
                 e.target.value = null; 
             };
 
-            // --- Memproses Data untuk Fitur Search, Filter, Sort Leads ---
             const processedLeads = React.useMemo(() => {
                 let result = [...leads];
 
-                // 1. Filter Status
                 if (statusFilter !== "All") {
                     result = result.filter(l => l.status === statusFilter);
                 }
 
-                // 2. Pencarian (Nama, No WA, Nama Iklan, ID Iklan)
                 if (searchTerm.trim() !== "") {
                     const lowerSearch = searchTerm.toLowerCase();
                     result = result.filter(l => {
@@ -512,7 +602,6 @@
                     });
                 }
 
-                // 3. Pengurutan (Sort)
                 result.sort((a, b) => {
                     if (sortBy === "newest") return b.created_at - a.created_at;
                     if (sortBy === "oldest") return a.created_at - b.created_at;
@@ -523,7 +612,6 @@
                     return 0;
                 });
 
-                // 4. Filter Rentang Tanggal Lead Masuk
                 if (leadListStartDate) {
                     result = result.filter(l => (l.lead_date || l.dateOnly) >= leadListStartDate);
                 }
@@ -584,14 +672,13 @@
                 return { date: dateKey, total, closing, revenue, spend, roas };
             }).sort((a, b) => new Date(b.date) - new Date(a.date));
 
-            // --- Kinerja Konten Iklan (Ad Stats) ---
+            // Kinerja Konten Iklan (Ad Stats)
             const groupedAds = {};
             const resolveGroupName = (adId, fallbackName) => {
                 const mappedName = getAdDisplayName(adId);
                 return mappedName || fallbackName || `Belum Terpetakan (ID: ${adId})`;
             };
 
-            // Leads masuk dialokasikan ke total, follow up, lost
             leadsGeneratedInRange.forEach(lead => {
                 const gName = resolveGroupName(lead.ad_id, lead.ad_name);
                 if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
@@ -602,7 +689,6 @@
                 else if (lead.status === 'Lost') groupedAds[gName].lost += 1;
             });
 
-            // Leads closing dialokasikan ke closing dan revenue
             leadsClosedInRange.forEach(lead => {
                 const gName = resolveGroupName(lead.ad_id, lead.ad_name);
                 if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
@@ -612,7 +698,6 @@
                 groupedAds[gName].revenue += (parseInt(lead.nominal_closing || lead.nominal) || 0);
             });
 
-            // Biaya iklan
             spendsInRange.forEach(spend => {
                 const gName = resolveGroupName(spend.ad_id, null);
                 if (!groupedAds[gName]) groupedAds[gName] = { adName: gName, adIds: new Set(), total: 0, closing: 0, followUp: 0, lost: 0, revenue: 0, spend: 0 };
@@ -688,7 +773,7 @@
                                 <div className="hidden lg:flex items-center gap-2 bg-gray-100 p-1 rounded-xl overflow-x-auto w-full md:w-auto">
                                     <button onClick={() => setActiveTab('dashboard')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'dashboard' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-chart-line-up text-base"></i> Dashboard</button>
                                     <button onClick={() => setActiveTab('leads')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'leads' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-tray text-base"></i> Input Leads <span className="bg-brand-100 text-brand-700 text-[10px] px-1.5 py-0.2 rounded-full font-bold">{leads.length}</span></button>
-                                    <button onClick={() => setActiveTab('ads_manager')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'ads_manager' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-tag text-base"></i> Master Iklan</button>
+                                    <button onClick={() => setActiveTab('ads_manager')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'ads_manager' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-database text-base"></i> Master Data</button>
                                     <button onClick={() => setActiveTab('ad_spend')} className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center gap-2 transition-all whitespace-nowrap ${activeTab === 'ad_spend' ? 'bg-white text-brand-700 shadow-sm' : 'text-gray-600 hover:text-gray-900'}`}><i className="ph ph-coins text-base"></i> Biaya Iklan</button>
                                 </div>
                                 
@@ -702,18 +787,19 @@
                         <div className="lg:hidden flex items-center justify-between bg-gray-50 border-t p-2 overflow-x-auto gap-2">
                              <button onClick={() => setActiveTab('dashboard')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'dashboard' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-chart-line-up"></i> Dash</button>
                              <button onClick={() => setActiveTab('leads')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'leads' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-tray"></i> Leads</button>
-                             <button onClick={() => setActiveTab('ads_manager')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'ads_manager' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-tag"></i> Master</button>
+                             <button onClick={() => setActiveTab('ads_manager')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'ads_manager' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-database"></i> Master</button>
                              <button onClick={() => setActiveTab('ad_spend')} className={`px-3 py-2 rounded-lg text-[11px] font-semibold flex-1 flex justify-center items-center gap-1.5 ${activeTab === 'ad_spend' ? 'bg-white text-brand-700 shadow-sm border border-gray-200' : 'text-gray-600'}`}><i className="ph ph-coins"></i> Spend</button>
                         </div>
                     </header>
 
                     <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6">
+                        {}
                         {activeTab === 'dashboard' ? (
                             <div className="space-y-6 animate-fade-in">
                                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
                                     <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2"><i className="ph-fill ph-chart-pie-slice text-brand-600"></i> Dashboard Kinerja</h2>
                                     <div className="flex items-center gap-2 bg-white p-2 rounded-xl shadow-sm border border-gray-200 text-sm">
-                                        <div className="flex items-center gap-2 px-2"><i className="ph ph-calendar-blank text-brand-600"></i><span className="text-gray-600 font-semibold text-xs uppercase">Filter Tgl Lead:</span></div>
+                                        <div className="flex items-center gap-2 px-2"><i className="ph ph-calendar-blank text-brand-600"></i><span className="text-gray-600 font-semibold text-xs uppercase">Filter Data:</span></div>
                                         <input type="date" value={filterStart} onChange={(e) => setFilterStart(e.target.value)} className="border-none bg-gray-50 rounded-lg p-1.5 focus:ring-2 focus:ring-brand-500 outline-none text-gray-700 font-medium cursor-pointer" />
                                         <span className="text-gray-400 font-bold">-</span>
                                         <input type="date" value={filterEnd} onChange={(e) => setFilterEnd(e.target.value)} className="border-none bg-gray-50 rounded-lg p-1.5 focus:ring-2 focus:ring-brand-500 outline-none text-gray-700 font-medium cursor-pointer" />
@@ -763,7 +849,7 @@
                                     <div className="px-5 py-4 border-b border-gray-100 bg-gray-50"><h3 className="font-bold text-gray-700 flex items-center gap-2"><i className="ph ph-calendar text-brand-600 text-lg"></i> Performa Harian</h3></div>
                                     <div className="overflow-x-auto p-4"><table className="w-full text-left text-sm">
                                         <thead><tr className="border-b-2 border-gray-100 text-gray-500 text-[11px] font-bold uppercase">
-                                            <th className="pb-3 pt-1">Tgl Lead / Biaya</th><th className="pb-3 pt-1 text-center">Leads</th><th className="pb-3 pt-1 text-center text-emerald-600">Closing</th><th className="pb-3 pt-1 text-right text-orange-600">Biaya Iklan</th><th className="pb-3 pt-1 text-right text-brand-600">Donasi Masuk</th><th className="pb-3 pt-1 text-center text-purple-600">ROAS Harian</th>
+                                            <th className="pb-3 pt-1">Tanggal</th><th className="pb-3 pt-1 text-center">Leads Masuk</th><th className="pb-3 pt-1 text-center text-emerald-600">Berhasil Closing</th><th className="pb-3 pt-1 text-right text-orange-600">Biaya Iklan</th><th className="pb-3 pt-1 text-right text-brand-600">Donasi Masuk</th><th className="pb-3 pt-1 text-center text-purple-600">ROAS Harian</th>
                                         </tr></thead>
                                         <tbody className="divide-y divide-gray-100">
                                             {dateStats.map((stat, i) => (
@@ -775,20 +861,54 @@
                             </div>
 
                         ) : activeTab === 'ads_manager' ? (
-                            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
-                                <div className="lg:col-span-5 bg-white p-6 rounded-2xl shadow-sm border border-gray-200"><h2 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph ph-plus-circle text-brand-600"></i>Tambah / Edit Nama Iklan</h2><p className="text-xs text-gray-500 mb-5">Jika Anda memasukkan Nama Iklan yang sama dengan ID berbeda, datanya akan digabung (disatukan).</p>
-                                    <form onSubmit={handleAddAdMapping} className="space-y-4">
-                                        <div><label className="block text-xs font-semibold text-gray-700 mb-1">ID Iklan Meta (utm_content) *</label><input type="text" value={newAdId} onChange={e => setNewAdId(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm font-mono outline-none"/></div>
-                                        <div><label className="block text-xs font-semibold text-gray-700 mb-1">Nama Konten Iklan *</label><input type="text" value={newAdName} onChange={e => setNewAdName(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm outline-none"/></div>
-                                        <button type="submit" className="w-full bg-brand-600 text-white font-semibold py-2.5 rounded-xl">Simpan Mapping</button>
-                                    </form>
+                            <div className="space-y-8 animate-fade-in">
+                                
+                                {/* 1. Bagian Ekspor / Impor Leads */}
+                                <div>
+                                    <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2 border-b pb-3 mb-4"><i className="ph-fill ph-database text-brand-600"></i> Manajemen Database Leads</h2>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 flex flex-col justify-between gap-4">
+                                            <div>
+                                                <h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph ph-export text-brand-600"></i> Export Data Leads</h3>
+                                                <p className="text-xs text-gray-500">Unduh seluruh data leads Anda ({leads.length} data) ke format CSV (Excel) untuk keperluan backup atau analisis manual.</p>
+                                            </div>
+                                            <button onClick={handleExportLeads} className="w-full bg-white border-2 border-brand-600 text-brand-700 hover:bg-brand-50 font-bold py-3 rounded-xl transition-colors flex items-center justify-center gap-2 shadow-sm">
+                                                <i className="ph-bold ph-download-simple text-lg"></i> Export {leads.length} Leads (.csv)
+                                            </button>
+                                        </div>
+
+                                        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200 flex flex-col justify-between gap-4">
+                                            <div>
+                                                <h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph ph-import text-brand-600"></i> Import Data Leads</h3>
+                                                <p className="text-xs text-gray-500">Unggah file CSV (misal hasil Export) untuk memulihkan data. Wajib memiliki kolom <strong className="text-gray-700">Nama Lengkap</strong> dan <strong className="text-gray-700">No WA</strong>.</p>
+                                            </div>
+                                            <div className={`border-2 border-dashed rounded-xl p-4 text-center transition-colors relative flex flex-col items-center justify-center min-h-[100px] ${isDraggingLeads ? 'border-brand-500 bg-brand-50' : 'border-gray-300 bg-gray-50'}`} onDragOver={(e) => { e.preventDefault(); setIsDraggingLeads(true); }} onDragLeave={() => setIsDraggingLeads(false)} onDrop={(e) => { e.preventDefault(); setIsDraggingLeads(false); if(e.dataTransfer.files) handleImportLeads({ target: { files: e.dataTransfer.files } }); }}>
+                                                <input type="file" accept=".csv" onChange={handleImportLeads} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                                                <i className="ph ph-upload-simple text-3xl text-brand-500 mb-2 block"></i><p className="text-sm font-semibold text-gray-700">Pilih / Tarik File CSV</p>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
-                                <div className="lg:col-span-7 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
-                                    <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><i className="ph ph-list-checks text-brand-600"></i> Daftar Iklan Terpetakan ({adMappings.length})</h2>
-                                    <div className="overflow-x-auto"><table className="w-full text-left text-sm">
-                                        <thead><tr className="border-b bg-gray-50 text-gray-600 text-xs uppercase"><th className="p-3">Nama Iklan</th><th className="p-3">ID Meta Tergabung</th><th className="p-3 text-right">Hapus Semua ID</th></tr></thead>
-                                        <tbody>{adMappings.map((m, idx) => (<tr key={idx} className="border-b"><td className="p-3 font-bold text-gray-800">{m.name}</td><td className="p-3 font-mono text-xs text-gray-500">{m.mappedIds.map(id => <span key={id} className="block bg-gray-100 px-1 py-0.5 rounded mb-1 w-max">ID: {id}</span>)}</td><td className="p-3 text-right"><button onClick={() => m.mappedIds.forEach(id => handleDeleteAdMapping(id))} className="text-red-500 bg-red-50 p-2 rounded-lg hover:bg-red-100 transition-colors"><i className="ph ph-trash"></i></button></td></tr>))}</tbody>
-                                    </table></div>
+
+                                {/* 2. Bagian Master Iklan */}
+                                <div>
+                                    <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2 border-b pb-3 mb-4"><i className="ph-fill ph-tags text-brand-600"></i> Master Identitas Iklan</h2>
+                                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                                        <div className="lg:col-span-5 bg-white p-6 rounded-2xl shadow-sm border border-gray-200"><h3 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph ph-plus-circle text-brand-600"></i>Tambah / Edit Nama Iklan</h3><p className="text-xs text-gray-500 mb-5">Jika Anda memasukkan Nama Iklan yang sama dengan ID berbeda, datanya akan digabung (disatukan).</p>
+                                            <form onSubmit={handleAddAdMapping} className="space-y-4">
+                                                <div><label className="block text-xs font-semibold text-gray-700 mb-1">ID Iklan Meta (utm_content) *</label><input type="text" value={newAdId} onChange={e => setNewAdId(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm font-mono outline-none"/></div>
+                                                <div><label className="block text-xs font-semibold text-gray-700 mb-1">Nama Konten Iklan *</label><input type="text" value={newAdName} onChange={e => setNewAdName(e.target.value)} className="w-full border rounded-xl p-2.5 text-sm outline-none"/></div>
+                                                <button type="submit" className="w-full bg-brand-600 text-white font-semibold py-2.5 rounded-xl hover:bg-brand-700 transition-colors">Simpan Mapping</button>
+                                            </form>
+                                        </div>
+                                        <div className="lg:col-span-7 bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
+                                            <h3 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2"><i className="ph ph-list-checks text-brand-600"></i> Daftar Iklan Terpetakan ({adMappings.length})</h3>
+                                            <div className="overflow-x-auto"><table className="w-full text-left text-sm">
+                                                <thead><tr className="border-b bg-gray-50 text-gray-600 text-xs uppercase"><th className="p-3">Nama Iklan</th><th className="p-3">ID Meta Tergabung</th><th className="p-3 text-right">Hapus Semua ID</th></tr></thead>
+                                                <tbody>{adMappings.map((m, idx) => (<tr key={idx} className="border-b"><td className="p-3 font-bold text-gray-800">{m.name}</td><td className="p-3 font-mono text-xs text-gray-500">{m.mappedIds.map(id => <span key={id} className="block bg-gray-100 px-1 py-0.5 rounded mb-1 w-max">ID: {id}</span>)}</td><td className="p-3 text-right"><button onClick={() => m.mappedIds.forEach(id => handleDeleteAdMapping(id))} className="text-red-500 bg-red-50 p-2 rounded-lg hover:bg-red-100 transition-colors"><i className="ph ph-trash"></i></button></td></tr>))}</tbody>
+                                            </table></div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
 
@@ -798,8 +918,8 @@
                                     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-200">
                                         <h2 className="text-lg font-bold text-gray-800 mb-1 flex items-center gap-2"><i className="ph-fill ph-file-csv text-brand-600"></i> Import CSV Meta Ads</h2>
                                         <p className="text-xs text-gray-500 mb-5">Otomatis membaca Tgl Awal Pelaporan, ID Iklan, Nama Iklan & Biaya (IDR/USD).</p>
-                                        <div className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors relative ${isDragging ? 'border-brand-500 bg-brand-50' : 'border-gray-300 bg-gray-50'}`} onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={(e) => { e.preventDefault(); setIsDragging(false); if(e.dataTransfer.files) handleImportCSV({ target: { files: e.dataTransfer.files } }); }}>
-                                            <input type="file" accept=".csv" onChange={handleImportCSV} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+                                        <div className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors relative ${isDragging ? 'border-brand-500 bg-brand-50' : 'border-gray-300 bg-gray-50'}`} onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }} onDragLeave={() => setIsDragging(false)} onDrop={(e) => { e.preventDefault(); setIsDragging(false); if(e.dataTransfer.files) handleImportCSVSpend({ target: { files: e.dataTransfer.files } }); }}>
+                                            <input type="file" accept=".csv" onChange={handleImportCSVSpend} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
                                             <i className="ph ph-upload-simple text-4xl text-brand-500 mb-3 block"></i><p className="text-sm font-semibold text-gray-700">Tarik & Lepas Laporan CSV</p>
                                         </div>
                                     </div>
@@ -921,6 +1041,7 @@
                         )}
                     </main>
 
+                    {}
                     {mappingModal.open && (
                         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4 animate-fade-in">
                             <div className="bg-white rounded-2xl w-full max-w-md p-6 shadow-2xl"><h3 className="text-xl font-bold text-gray-800 mb-1">Beri Nama Konten Iklan</h3><p className="text-xs text-gray-500 mb-4">ID Meta: <code className="bg-gray-100 px-1 rounded text-brand-600">{mappingModal.adId}</code></p><div className="mb-5"><label className="block text-[11px] font-bold text-gray-600 uppercase tracking-wide mb-1.5">Nama Iklan</label><input type="text" value={mappingModal.adName} onChange={e => setMappingModal(prev => ({ ...prev, adName: e.target.value }))} className="w-full border border-gray-300 focus:border-brand-500 rounded-xl p-3 text-sm outline-none focus:ring-2 focus:ring-brand-200 transition-all" autoFocus placeholder="Cth: Video Wakaf Sedekah 01"/></div><div className="flex justify-end gap-3"><button onClick={() => setMappingModal({ open: false, adId: '', adName: '' })} className="px-5 py-2.5 rounded-xl text-sm font-bold bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors">Batal</button><button onClick={handleQuickSaveMapping} className="px-5 py-2.5 rounded-xl text-sm font-bold bg-brand-600 text-white hover:bg-brand-700 shadow-md transition-colors">Simpan Nama</button></div></div>
